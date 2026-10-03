@@ -76,16 +76,96 @@
             left: 10px;
             bottom: 25px;
             z-index: 1000;
+            width: 420px;
             max-width: 90%;
-            padding: 6px 8px;
-            background-color: rgba(0, 0, 0, .75);
+            max-height: 60%;
+            overflow-y: auto;
             color: #eee;
             font: 11px 'Lucida Grande', sans-serif;
+        }
+
+        #status-message, .task {
+            margin-top: 4px;
+            padding: 6px 8px;
+            background-color: rgba(0, 0, 0, .75);
             white-space: pre-wrap;
         }
 
-        #status:empty {
+        #status-message {
+            color: #ff8080;
+        }
+
+        #status-message:empty {
             display: none;
+        }
+
+        .task-head {
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+        }
+
+        .task-label {
+            flex: 1;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        .task-state {
+            color: #aaa;
+        }
+
+        .task.running .task-state {
+            color: #ff6060;
+        }
+
+        .task.done .task-state {
+            color: #80d080;
+        }
+
+        .task.failed .task-state, .task.failed .task-text {
+            color: #ff8080;
+        }
+
+        .task-close {
+            padding: 0 2px;
+            border: none;
+            background: none;
+            color: #aaa;
+            font: inherit;
+            cursor: pointer;
+        }
+
+        .task-close:hover {
+            color: white;
+        }
+
+        .task-bar {
+            height: 4px;
+            margin: 5px 0 3px;
+            overflow: hidden;
+            background-color: rgba(255, 255, 255, .15);
+        }
+
+        .task-fill {
+            width: 0;
+            height: 100%;
+            background-color: #ff6060;
+            transition: width .2s;
+        }
+
+        .task-bar.busy .task-fill {
+            width: 30%;
+            animation: task-busy 1.2s linear infinite;
+        }
+
+        @keyframes task-busy {
+            from { margin-left: -30%; }
+            to { margin-left: 100%; }
+        }
+
+        .task-text {
+            margin-top: 2px;
         }
 
         #export-box {
@@ -170,11 +250,11 @@
 
             <p>Images generate at 256 px per in-game km plus 1 on each axis, e.g. 7169 x 7169 for a 28 x 28 km Gigantomaniac map.</p>
 
-            <p>The live values come from a coarse preview of the box. If the full-resolution export finds a higher peak or a lower point, it widens the range and updates the fields, so always enter the values shown after the export. The bottom-left panel also shows those values, and the PNG's <code>Description</code> text chunk stores them as JSON.</p>
+            <p>The live values come from a coarse preview of the box. If the full-resolution export finds a higher peak or a lower point, it widens the range, so always enter the values from the finished task in the bottom-left panel. The PNG's <code>Description</code> text chunk also stores them as JSON.</p>
 
             <p>Water levels can only be found where the elevation data stores water as perfectly flat surfaces. Generally this exists for lakes, reservoirs, rivers and the sea.</p>
 
-            <p>Elevation data comes from the <a href="https://registry.opendata.aws/terrain-tiles/" target="_blank">AWS Terrain Tiles</a> open dataset (terrarium encoding, zoom 0-15, no API key). The tiles contain a few known bad patches with wrong values, mostly along coastlines, but they'll generally get smoothed out when you export. Neighboring tiles are sometimes built from different surveys, which leaves straight steps along their shared edges. The export also measures those steps and blends them out.</p>
+            <p>Elevation data comes from the <a href="https://registry.opendata.aws/terrain-tiles/" target="_blank">AWS Terrain Tiles</a> open dataset (terrarium encoding, zoom 0-15, no API key). The tiles contain a few known bad patches with wrong values, from single pixels to whole tiles of noise. The export replaces them with the next coarser zoom level's data. Neighboring tiles are sometimes built from different surveys, which leaves straight steps along their shared edges. The export also measures those steps and blends them out.</p>
 
             <p>Check out the code on <a href="https://github.com/Skyl3lazer/heightmapper-tf" target="_blank">GitHub</a>.</p>
 
@@ -183,7 +263,7 @@
     <div id="help-blocker"></div>
     <div id="map"></div>
     <div id="export-box"><div id="export-box-label"><div id="export-box-size"></div><div id="export-box-water"></div></div></div>
-    <div id="status"></div>
+    <div id="status"><div id="tasks"></div><div id="status-message"></div></div>
 
     <!-- 3rd party libraries -->
     <script src="https://unpkg.com/leaflet@1.0.1/dist/leaflet.js"></script>

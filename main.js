@@ -6,13 +6,11 @@ map = (function () {
   
   var map_start_location = [0, 0, 2];
   var moving = false;
-  var exporting = false;
   var analysis = null;
   var analysisGeneration = 0;
   // What the user typed into whichever of height scale and steepness "scale by" picks. Auto mode may show less so high peaks fit under the game's limit.
   var requestedText = '1';
   var exportFolder;
-  var inputError = false;
   const exportDefaults = {lat: 39.109328, lng: -76.813227, metersPerPixel: 10};
   const RATIOS = ['1:1', '1:2', '1:3', '1:4', '1:5'];
   const CLIMATES = ['Temperate', 'Dry', 'Tropical', 'Subarctic'];
@@ -20,6 +18,8 @@ map = (function () {
   const GAME_MIN_HEIGHT = -100;
   const GAME_MAX_HEIGHT = 3177;
   const GAME_METERS_PER_PIXEL = 4;
+  // In-game meters the export carves water below the water level, so no surface sits exactly on it.
+  const WATER_DEPTH = 0.5;
   // The game has one water level, so a lake's level drowns all lower land. Auto mode skips levels drowning more than this share of the map.
   const MAX_FLOOD_SHARE = 0.15;
   // ...and levels drowning more than this many times the water body's own area, like a tiny flat patch at the bottom of a dry valley.
@@ -280,7 +280,7 @@ map = (function () {
     gui.center = center.lat.toFixed(6) + ', ' + center.lng.toFixed(6);
     gui.metersPerPixel = mpp.toFixed(3);
     // Steepness mode waits for the analysis, which also fits the scale under the game's limit.
-    if (gui.scaleMode == 'height scale' && Number(gui.heightScale) > 0) gui.steepness = steepnessText(Number(gui.heightScale));
+    if (gui.scaleMode == 'height scale' && Number(gui.heightScale) > 0) gui.steepness = steepnessText(Number(gui.heightScale), mpp);
     exportFolder.__controllers.forEach(function(c) { c.updateDisplay(); });
   }
 
@@ -345,8 +345,8 @@ map = (function () {
   }
 
   // How many times steeper than real the terrain comes out, given the game's 4 m pixels.
-  function steepnessText(k) {
-    return String(Number((k * metersPerPixel() / GAME_METERS_PER_PIXEL).toPrecision(3)));
+  function steepnessText(k, mpp) {
+    return String(Number((k * mpp / GAME_METERS_PER_PIXEL).toPrecision(3)));
   }
 
   // The height scale the user asked for, from whichever field "scale by" picks.
@@ -364,7 +364,7 @@ map = (function () {
 
   function showScale(k) {
     gui.heightScale = String(k);
-    gui.steepness = steepnessText(k);
+    gui.steepness = steepnessText(k, metersPerPixel());
     controller('heightScale').updateDisplay();
     controller('steepness').updateDisplay();
   }
@@ -384,25 +384,38 @@ map = (function () {
     applyManualHeights();
   }
 
-  // Real-meter clamp from the in-game ocean floor, so water keeps its in-game depth at any height scale.
-  function heightFloor() {
+  // The lowest in-game height water may reach, or 0 with ocean data off.
+  function oceanFloor() {
     if (!gui.include_oceans) return 0;
     var floor = Number(gui.oceanFloor);
     if (!(floor <= 0 && floor >= GAME_MIN_HEIGHT)) throw new Error('ocean floor must be between ' + GAME_MIN_HEIGHT + ' and 0 meters');
-    return floor / heightScale();
+    return floor;
   }
 
-  // Real-meter clamps for sampled heights. Auto mode first lowers the requested scale just enough for the peak to fit under the game's limit.
+  // Lowers the requested scale just enough for the peak to fit under the game's limit.
+  function fittedScale(requested, peak) {
+    return scaleDigits(requested * peak > GAME_MAX_HEIGHT ? GAME_MAX_HEIGHT / peak : requested);
+  }
+
+  // Real-meter clamps from the in-game ocean floor and ceiling, so water keeps its in-game depth at any height scale.
+  function limitsFor(k, floor) {
+    return {floor: floor / k, ceiling: GAME_MAX_HEIGHT / k};
+  }
+
   function heightLimits(peak) {
-    var k = requestedScale();
-    if (gui.autoexpose && k * peak > GAME_MAX_HEIGHT) k = GAME_MAX_HEIGHT / peak;
-    showScale(scaleDigits(k));
-    return {floor: heightFloor(), ceiling: GAME_MAX_HEIGHT / heightScale()};
+    var k = gui.autoexpose ? fittedScale(requestedScale(), peak) : scaleDigits(requestedScale());
+    showScale(k);
+    return limitsFor(k, oceanFloor());
   }
 
-  // In-game level that puts a flat water surface just under water.
-  function waterLevelFor(surface, k) {
-    return Math.ceil(k * surface.top + 0.5);
+  // In-game level that puts a flat water surface under water. With ocean data the export carves below the level, so it can sit right on the surface.
+  function waterLevelFor(surface, k, carved) {
+    return Math.ceil(k * surface.top + (carved ? 0 : WATER_DEPTH));
+  }
+
+  // Real meters: everything at or below an in-game water level ends WATER_DEPTH under it.
+  function submergeFor(level, k) {
+    return {level: level / k, top: (level - WATER_DEPTH) / k};
   }
 
   function setBoxWater(text) {
@@ -424,7 +437,7 @@ map = (function () {
           if (generation != analysisGeneration) throw new Error('superseded');
           return heightLimits(peak);
         },
-        bathymetryLevel: previewBathymetryLevel
+        submerge: previewSubmerge
       });
     } catch (e) {
       if (generation == analysisGeneration) setBoxWater(e.message);
@@ -436,13 +449,13 @@ map = (function () {
     else describeWater();
   }
 
-  // Real meters below which the preview takes NOAA depths: the water level the analysis is about to pick, or the typed one.
-  function previewBathymetryLevel(water, floodShare, areaKm2) {
+  // The preview takes NOAA depths below the water level the analysis is about to pick, or the typed one.
+  function previewSubmerge(water, floodShare, areaKm2) {
     if (!gui.include_oceans) return null;
     var k = heightScale();
-    if (!gui.autoexpose) return Number(gui.waterLevel) / k;
-    var choice = autoWaterChoice(waterChoices(water, k, floodShare), areaKm2);
-    return choice ? choice.level / k : null;
+    if (!gui.autoexpose) return submergeFor(Number(gui.waterLevel), k);
+    var choice = autoWaterChoice(waterChoices(water, k, floodShare, true), areaKm2);
+    return choice ? submergeFor(choice.level, k) : null;
   }
 
   function autoWaterChoice(choices, areaKm2) {
@@ -452,10 +465,10 @@ map = (function () {
   }
 
   // In-game water levels with their total surface area and the share of the map's dry land each would drown, largest first.
-  function waterChoices(water, k, floodShare) {
+  function waterChoices(water, k, floodShare, carved) {
     var choices = [];
     water.forEach(function(w) {
-      var level = waterLevelFor(w, k);
+      var level = waterLevelFor(w, k, carved);
       var same = choices.filter(function(c) { return c.level == level; })[0];
       if (same) same.areaKm2 += w.areaKm2;
       else choices.push({level: level, areaKm2: w.areaKm2, flood: floodShare(level / k)});
@@ -470,7 +483,7 @@ map = (function () {
       setBoxWater(e.message);
       return;
     }
-    var shown = waterChoices(analysis.water, k, analysis.floodShare).filter(function(c, i) { return i == 0 || c.areaKm2 >= 0.1; });
+    var shown = waterChoices(analysis.water, k, analysis.floodShare, gui.include_oceans).filter(function(c, i) { return i == 0 || c.areaKm2 >= 0.1; });
     var depthNote = analysis.bathymetry && /unavailable/.test(analysis.bathymetry) ? ' (' + analysis.bathymetry + ')' : '';
     var climate = suggestClimate(analysis);
     var lowered = gui.autoexpose && k < scaleDigits(requestedScale());
@@ -509,15 +522,21 @@ map = (function () {
       showInputError(e.message);
       return;
     }
-    var min = Math.max(GAME_MIN_HEIGHT, Math.floor(k * analysis.min));
-    var max = Math.min(GAME_MAX_HEIGHT, Math.max(min + 1, Math.ceil(k * analysis.max)));
-    gui.minHeight = String(min);
-    gui.maxHeight = String(max);
-    var choice = autoWaterChoice(waterChoices(analysis.water, k, analysis.floodShare), analysis.areaKm2);
-    gui.waterLevel = String(choice ? choice.level : Math.max(GAME_MIN_HEIGHT, min - 1));
+    var h = heightsFor(analysis, k, gui.include_oceans);
+    gui.minHeight = String(h.min);
+    gui.maxHeight = String(h.max);
+    gui.waterLevel = String(h.water);
     describeWater();
     refreshGUI();
     updateDisplayRange();
+  }
+
+  // In-game minimum, maximum and water level for an analysis at height scale k.
+  function heightsFor(a, k, carved) {
+    var min = Math.max(GAME_MIN_HEIGHT, Math.floor(k * a.min));
+    var max = Math.min(GAME_MAX_HEIGHT, Math.max(min + 1, Math.ceil(k * a.max)));
+    var choice = autoWaterChoice(waterChoices(a.water, k, a.floodShare, carved), a.areaKm2);
+    return {k: k, min: min, max: max, water: choice ? choice.level : Math.max(GAME_MIN_HEIGHT, min - 1)};
   }
 
   function readHeights() {
@@ -551,33 +570,135 @@ map = (function () {
     scene.requestRedraw();
   }
 
-  function setStatus(text) {
-    document.getElementById('status').textContent = text;
-    inputError = false;
+  function showInputError(message) {
+    document.getElementById('status-message').textContent = message || '';
   }
 
-  // Clears only a previous input error, so a correction doesn't wipe the last export's summary.
-  function showInputError(message) {
-    if (message) {
-      setStatus(message);
-      inputError = true;
-    } else if (inputError) {
-      setStatus('');
+  var tasks = [];
+  var tasksRunning = false;
+
+  // Snapshots the settings when an export is queued, so panning or editing afterwards doesn't change what it writes.
+  // run(job, report) resolves to the summary lines shown once the task finishes.
+  function queueTask(label, run, needsHeights) {
+    var job;
+    try {
+      job = exportJob(needsHeights);
+    } catch (e) {
+      showInputError(e.message);
+      return;
+    }
+    showInputError(null);
+    tasks.push({label: label + ': ' + job.name + ', ' + job.mapName, job: job, run: run, state: 'queued', stage: '', fraction: null, lines: [], open: true});
+    renderTasks();
+    var panel = document.getElementById('status');
+    panel.scrollTop = panel.scrollHeight;
+    runTasks();
+  }
+
+  async function runTasks() {
+    if (tasksRunning) return;
+    tasksRunning = true;
+    var task;
+    while ((task = tasks.filter(function(t) { return t.state == 'queued'; })[0])) {
+      task.state = 'running';
+      renderTasks();
+      try {
+        task.lines = await task.run(task.job, reporter(task));
+        task.state = 'done';
+      } catch (e) {
+        task.lines = [e.message];
+        task.state = 'failed';
+        console.error(e);
+      }
+      // Only the newest result stays expanded.
+      tasks.forEach(function(t) { if (t !== task && t.state != 'queued') t.open = false; });
+      renderTasks();
+    }
+    tasksRunning = false;
+  }
+
+  // report(stage, fraction): fraction runs 0 to 1, or is left out when the step has no measurable progress.
+  function reporter(task) {
+    return function(stage, fraction) {
+      task.stage = stage;
+      task.fraction = fraction === undefined ? null : fraction;
+      showProgress(task);
+    };
+  }
+
+  function renderTasks() {
+    var list = document.getElementById('tasks');
+    list.textContent = '';
+    tasks.forEach(function(t) {
+      var item = element('div', 'task ' + t.state);
+      var head = element('div', 'task-head');
+      var label = element('span', 'task-label', t.label);
+      label.onclick = function() {
+        t.open = !t.open;
+        renderTasks();
+      };
+      head.appendChild(label);
+      t.view = {state: head.appendChild(element('span', 'task-state'))};
+      if (t.state != 'running') {
+        var close = head.appendChild(element('button', 'task-close', 'x'));
+        close.title = t.state == 'queued' ? 'Cancel' : 'Dismiss';
+        close.onclick = function() {
+          tasks.splice(tasks.indexOf(t), 1);
+          renderTasks();
+        };
+      }
+      item.appendChild(head);
+      if (t.state == 'running') {
+        t.view.bar = item.appendChild(element('div', 'task-bar'));
+        t.view.fill = t.view.bar.appendChild(element('div', 'task-fill'));
+        t.view.text = item.appendChild(element('div', 'task-text'));
+      } else if (t.open && t.lines.length) {
+        item.appendChild(element('div', 'task-text', t.lines.join('\n')));
+      }
+      list.appendChild(item);
+      showProgress(t);
+    });
+  }
+
+  // Updates a task's card in place, since rebuilding the list on every tile would swallow clicks on it.
+  function showProgress(t) {
+    if (!t.view) return;
+    if (t.state == 'queued') {
+      var ahead = tasks.slice(0, tasks.indexOf(t)).filter(function(o) { return o.state == 'queued' || o.state == 'running'; }).length;
+      t.view.state.textContent = 'queued' + (ahead ? ', ' + ahead + ' ahead' : '');
+    } else if (t.state == 'running') {
+      t.view.state.textContent = t.fraction === null ? 'running' : Math.round(t.fraction * 100) + '%';
+      t.view.bar.className = 'task-bar' + (t.fraction === null ? ' busy' : '');
+      t.view.fill.style.width = t.fraction === null ? '' : (t.fraction * 100).toFixed(1) + '%';
+      t.view.text.textContent = t.stage;
+    } else {
+      t.view.state.textContent = t.state;
     }
   }
-  
-  // One export at a time, with failures reported in the status panel.
-  async function runExport(label, task) {
-    if (exporting) return;
-    exporting = true;
-    try {
-      await task();
-    } catch (e) {
-      setStatus(label + ' failed: ' + e.message);
-      console.error(e);
-    } finally {
-      exporting = false;
-    }
+
+  function element(tag, className, text) {
+    var e = document.createElement(tag);
+    e.className = className;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  // Everything an export reads, taken when it's queued.
+  function exportJob(needsHeights) {
+    var out = outputSize();
+    return {
+      bounds: exportBounds(), out: out, northLeft: northLeft(), image: imageSize(), mpp: metersPerPixel(),
+      name: exportName(), mapName: mapName(), climate: gui.climate, bitDepth: Number(gui.bitDepth),
+      auto: gui.autoexpose, oceans: gui.include_oceans, oceanFloor: needsHeights ? oceanFloor() : 0,
+      requested: needsHeights ? requestedScale() : null, heights: needsHeights ? readHeights() : null, analysis: analysis,
+      towns: {maxTowns: Math.round(gui.maxTowns), minSpacing: Number(gui.townSpacing), includeVillages: gui.includeVillages},
+      view: viewKey()
+    };
+  }
+
+  // Changes whenever the live fields would stop describing an export queued now.
+  function viewKey() {
+    return JSON.stringify([exportBounds(), outputSize(), gui.scaleMode, requestedText, gui.autoexpose, gui.include_oceans, gui.oceanFloor]);
   }
 
   function exportName() {
@@ -588,48 +709,46 @@ map = (function () {
     return gui.mapSize + ' ' + gui.ratio + ' ' + gui.orientation;
   }
 
-  async function buildHeightmap() {
-    // Fails fast on bad input rather than after fetching every tile.
-    requestedScale();
-    heightFloor();
-    var h = readHeights();
+  async function buildHeightmap(job, report) {
+    var h = Object.assign({}, job.heights);
     var meta = {heightScale: h.k, waterLevel: h.water};
-    var out = outputSize();
-    setStatus('Fetching elevation tiles...');
+    report('Fetching elevation tiles...', 0);
     var result = await heightmapExport.render({
-      bounds: exportBounds(),
-      width: out.width,
-      height: out.height,
-      bitDepth: Number(gui.bitDepth),
+      bounds: job.bounds,
+      width: job.out.width,
+      height: job.out.height,
+      bitDepth: job.bitDepth,
       // Full resolution can find a higher peak than the preview, which moves the auto scale and the water level with it.
       limits: function(peak) {
-        var scale = gui.heightScale, limits = heightLimits(peak);
-        if (gui.heightScale != scale) {
-          if (gui.autoexpose && analysis) applyAnalysis();
-          h = readHeights();
+        var k = job.auto ? fittedScale(job.requested, peak) : h.k;
+        if (k != h.k && job.analysis) {
+          h = heightsFor(job.analysis, k, job.oceans);
           Object.assign(meta, {heightScale: h.k, waterLevel: h.water});
         }
-        return limits;
+        return limitsFor(h.k, job.oceanFloor);
       },
       // Auto mode widens to whole in-game meters if full resolution finds a higher peak or lower point than the preview.
       range: function(lo, hi) {
-        if (gui.autoexpose) {
+        if (job.auto) {
           h.min = Math.max(GAME_MIN_HEIGHT, Math.min(h.min, Math.floor(h.k * lo)));
           h.max = Math.min(GAME_MAX_HEIGHT, Math.max(h.max, Math.ceil(h.k * hi)));
         }
         return {min: h.min / h.k, max: h.max / h.k};
       },
-      bathymetryLevel: gui.include_oceans ? h.water / h.k : null,
-      northLeft: northLeft(),
+      submerge: job.oceans ? submergeFor(h.water, h.k) : null,
+      northLeft: job.northLeft,
       meta: meta,
       onProgress: function(fraction) {
-        setStatus('Fetching elevation tiles... ' + Math.round(fraction * 100) + '%');
+        report('Fetching elevation tiles...', fraction);
       },
-      onStage: setStatus
+      onStage: report
     });
-    if (String(h.min) != gui.minHeight || String(h.max) != gui.maxHeight) {
+    // The fields show the final values, as long as they still describe this export.
+    if (job.auto && viewKey() == job.view) {
+      showScale(h.k);
       gui.minHeight = String(h.min);
       gui.maxHeight = String(h.max);
+      gui.waterLevel = String(h.water);
       refreshGUI();
       updateDisplayRange();
     }
@@ -637,38 +756,37 @@ map = (function () {
     return {blob: result.blob, meta: result.meta, heights: h};
   }
 
-  function heightmapSummary(r) {
+  function heightmapSummary(r, job) {
     var m = r.meta, h = r.heights;
     return [
       'Transport Fever import: Minimum Height ' + h.min + ', Maximum Height ' + h.max + ', Water Level ' + h.water,
-      'height scale ' + h.k + ', ' + steepnessText(h.k) + 'x real steepness, real elevations ' + m.blackMeters.toFixed(2) + ' to ' + m.whiteMeters.toFixed(2) + ' m',
+      'height scale ' + h.k + ', ' + steepnessText(h.k, job.mpp) + 'x real steepness, real elevations ' + m.blackMeters.toFixed(2) + ' to ' + m.whiteMeters.toFixed(2) + ' m',
       'water depth: ' + (m.bathymetry || 'ocean data off, below sea level clamped to 0 m'),
       m.cappedFraction > 0 ? (m.cappedFraction * 100).toFixed(2) + '% of the map was above the game\'s ' + GAME_MAX_HEIGHT + ' m limit and was flattened. Lower the height scale to keep those peaks.' : null,
-      'real ' + (m.metersPerPixel * (m.width - 1) / 1000).toFixed(2) + ' x ' + (m.metersPerPixel * (m.height - 1) / 1000).toFixed(2) + ' km at ' + m.metersPerPixel.toFixed(3) + ' m/px',
+      'real ' + (job.mpp * (job.out.width - 1) / 1000).toFixed(2) + ' x ' + (job.mpp * (job.out.height - 1) / 1000).toFixed(2) + ' km at ' + m.metersPerPixel.toFixed(3) + ' m/px',
       'center ' + m.centerLat.toFixed(6) + ', ' + m.centerLng.toFixed(6),
       'bounds W ' + m.west.toFixed(6) + ' S ' + m.south.toFixed(6) + ' E ' + m.east.toFixed(6) + ' N ' + m.north.toFixed(6),
       'source zoom ' + m.sourceZoom + (m.upsampled ? ' (output is finer than the source data, upsampled)' : '')
     ].filter(function(line) { return line !== null; });
   }
 
-  async function buildBiomes() {
-    var h = readHeights();
-    var out = outputSize();
-    var bounds = exportBounds();
+  // h: the in-game heights the water level comes from, when they differ from the job's.
+  async function buildBiomes(job, report, h) {
+    h = h || job.heights;
     var volcanoes = [];
-    if (gui.climate == 'Tropical') {
-      setStatus('Looking up volcanoes...');
-      volcanoes = await overpass.nodes(bounds, '["natural"="volcano"]');
+    if (job.climate == 'Tropical') {
+      report('Looking up volcanoes...');
+      volcanoes = await overpass.nodes(job.bounds, '["natural"="volcano"]');
     }
     var result = await heightmapExport.renderBiomes({
-      bounds: bounds,
-      width: out.width,
-      height: out.height,
-      climate: gui.climate,
+      bounds: job.bounds,
+      width: job.out.width,
+      height: job.out.height,
+      climate: job.climate,
       waterLevel: h.water / h.k,
       volcanoes: volcanoes,
-      northLeft: northLeft(),
-      onStage: setStatus
+      northLeft: job.northLeft,
+      onStage: report
     });
     result.volcanoCount = volcanoes.length;
     return result;
@@ -690,18 +808,14 @@ map = (function () {
     }));
   }
 
-  async function buildTowns() {
-    var out = outputSize();
-    setStatus('Looking up towns...');
-    var result = await townExport.build({
-      bounds: exportBounds(),
-      width: out.width,
-      height: out.height,
-      maxTowns: Math.round(gui.maxTowns),
-      minSpacing: Number(gui.townSpacing),
-      includeVillages: gui.includeVillages,
-      northLeft: northLeft()
-    });
+  async function buildTowns(job, report) {
+    report('Looking up towns...');
+    var result = await townExport.build(Object.assign({
+      bounds: job.bounds,
+      width: job.out.width,
+      height: job.out.height,
+      northLeft: job.northLeft
+    }, job.towns));
     townLayer.clearLayers().addTo(map);
     result.towns.forEach(function(t) {
       L.circleMarker([t.lat, t.lng], {radius: 4, color: '#ffcc00', weight: 2, fillOpacity: 0.8})
@@ -720,54 +834,57 @@ map = (function () {
   }
 
   function exportRegion() {
-    return runExport('Export', async function() {
-      var r = await buildHeightmap();
-      saveAs(r.blob, exportName() + '.png');
-      setStatus(['Saved ' + mapName() + ', ' + r.meta.width + 'x' + r.meta.height + ' ' + r.meta.bitDepth + '-bit grayscale']
-        .concat(heightmapSummary(r)).join('\n'));
-    });
+    queueTask('Heightmap', async function(job, report) {
+      var r = await buildHeightmap(job, report);
+      saveAs(r.blob, job.name + '.png');
+      return ['Saved ' + job.name + '.png, ' + r.meta.width + 'x' + r.meta.height + ' ' + r.meta.bitDepth + '-bit grayscale']
+        .concat(heightmapSummary(r, job));
+    }, true);
   }
 
   function exportBiomeMaps() {
-    return runExport('Biome export', async function() {
-      var result = await buildBiomes();
-      var files = biomeFiles(result, exportName());
+    queueTask('Biomes', async function(job, report) {
+      var result = await buildBiomes(job, report);
+      var files = biomeFiles(result, job.name);
       files.forEach(function(f) { saveAs(f.blob, f.path); });
-      var image = imageSize();
-      setStatus(['Saved ' + files.map(function(f) { return f.path; }).join(', ') + ', ' + image.width + 'x' + image.height + ', ' + gui.climate]
-        .concat(biomeSummary(result), ['Put them in the game\'s biomes folder and import them after the heightmap.']).join('\n'));
-    });
+      return ['Saved ' + files.map(function(f) { return f.path; }).join(', ') + ', ' + job.image.width + 'x' + job.image.height + ', ' + job.climate]
+        .concat(biomeSummary(result), ['Put them in the game\'s biomes folder and import them after the heightmap.']);
+    }, true);
   }
 
   function exportTowns() {
-    return runExport('Town export', async function() {
-      var result = await buildTowns();
-      saveAs(new Blob([result.lua], {type: 'text/plain'}), exportName() + '_towns.lua');
+    queueTask('Towns', async function(job, report) {
+      var result = await buildTowns(job, report);
+      saveAs(new Blob([result.lua], {type: 'text/plain'}), job.name + '_towns.lua');
       var lines = townSummary(result);
       lines[0] = 'Saved ' + lines[0];
-      setStatus(lines.join('\n'));
-    });
+      return lines;
+    }, false);
   }
 
   // Laid out like the game's user data folder, so extracting it there puts every file where its import dialog looks.
   function exportAll() {
-    return runExport('Export all', async function() {
-      var name = exportName();
-      var heightmap = await buildHeightmap();
-      var biomes = await buildBiomes();
-      var towns = await buildTowns();
-      setStatus('Writing ' + name + '.zip...');
+    queueTask('Export all', async function(job, report) {
+      function step(n, name) {
+        return function(stage, fraction) {
+          report(n + '/3 ' + name + ': ' + stage, fraction);
+        };
+      }
+      var heightmap = await buildHeightmap(job, step(1, 'heightmap'));
+      var biomes = await buildBiomes(job, step(2, 'biomes'), heightmap.heights);
+      var towns = await buildTowns(job, step(3, 'towns'));
+      report('Writing ' + job.name + '.zip...');
       var zip = await heightmapExport.zip([
-        {path: 'heightmaps/' + name + '.png', blob: heightmap.blob}
-      ].concat(biomeFiles(biomes, name).map(function(f) {
+        {path: 'heightmaps/' + job.name + '.png', blob: heightmap.blob}
+      ].concat(biomeFiles(biomes, job.name).map(function(f) {
         return {path: 'biomes/' + f.path, blob: f.blob};
       }), [
-        {path: 'towns_industries/' + name + '.lua', blob: new Blob([towns.lua], {type: 'text/plain'})}
+        {path: 'towns_industries/' + job.name + '.lua', blob: new Blob([towns.lua], {type: 'text/plain'})}
       ]));
-      saveAs(zip, name + '.zip');
-      setStatus(['Saved ' + name + '.zip for ' + mapName() + ', ' + gui.climate + '. Extract it into the Transport Fever 3 user folder, %APPDATA%\\Transport Fever 3.']
-        .concat(heightmapSummary(heightmap).slice(0, 4), biomeSummary(biomes), townSummary(towns)).join('\n'));
-    });
+      saveAs(zip, job.name + '.zip');
+      return ['Saved ' + job.name + '.zip for ' + job.climate + '. Extract it into the Transport Fever 3 user folder, %APPDATA%\\Transport Fever 3.']
+        .concat(heightmapSummary(heightmap, job).slice(0, 4), biomeSummary(biomes), townSummary(towns));
+    }, true);
   }
 
   // show and hide help screen

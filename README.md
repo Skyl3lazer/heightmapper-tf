@@ -35,11 +35,11 @@ Other controls:
 
 Images generate at 256 px per in-game km plus 1 on each axis, e.g. 7169 x 7169 for a 28 x 28 km Gigantomaniac map.
 
-The live values come from a coarse preview of the box. If the full-resolution export finds a higher peak or a lower point, it widens the range and updates the fields, so always enter the values shown after the export. The bottom-left panel also shows those values, and the PNG's `Description` text chunk stores them as JSON.
+The live values come from a coarse preview of the box. If the full-resolution export finds a higher peak or a lower point, it widens the range, so always enter the values from the finished task in the bottom-left panel. The PNG's `Description` text chunk also stores them as JSON.
 
 Water levels can only be found where the elevation data stores water as perfectly flat surfaces. Generally this exists for lakes, reservoirs, rivers and the sea.
 
-Elevation data comes from the [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) open dataset (terrarium encoding, zoom 0-15, no API key). The tiles contain a few known bad patches with wrong values, mostly along coastlines, but they'll generally get smoothed out when you export. Neighboring tiles are sometimes built from different surveys, which leaves straight steps along their shared edges. The export also measures those steps and blends them out.
+Elevation data comes from the [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) open dataset (terrarium encoding, zoom 0-15, no API key). The tiles contain a few known bad patches with wrong values, from single pixels to whole tiles of noise. The export replaces them with the next coarser zoom level's data. Neighboring tiles are sometimes built from different surveys, which leaves straight steps along their shared edges. The export also measures those steps and blends them out.
 
 ### Publishing
 
