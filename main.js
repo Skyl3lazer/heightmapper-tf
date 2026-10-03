@@ -20,6 +20,8 @@ map = (function () {
   const GAME_METERS_PER_PIXEL = 4;
   // In-game meters the export carves water below the water level, so no surface sits exactly on it.
   const WATER_DEPTH = 0.5;
+  // Real meters above a flat water surface that still count as its shore, since elevation data is about this noisy at the waterline.
+  const SHORE_TOLERANCE = 0.5;
   // The game has one water level, so a lake's level drowns all lower land. Auto mode skips levels drowning more than this share of the map.
   const MAX_FLOOD_SHARE = 0.15;
   // ...and levels drowning more than this many times the water body's own area, like a tiny flat patch at the bottom of a dry valley.
@@ -172,6 +174,7 @@ map = (function () {
     gui.scaleMode = 'height scale';
     gui.heightScale = requestedText;
     gui.steepness = '';
+    gui.smoothing = 0;
     gui.oceanFloor = String(GAME_MIN_HEIGHT);
     gui.bitDepth = 16;
     gui.fileName = 'heightmap';
@@ -187,6 +190,7 @@ map = (function () {
     });
     exportFolder.add(gui, 'heightScale').name('height scale').onFinishChange(scaleChanged);
     exportFolder.add(gui, 'steepness').name('steepness (x real)').onFinishChange(scaleChanged);
+    exportFolder.add(gui, 'smoothing', 0, 100).step(2).name('smoothing (m)').onFinishChange(runAnalysis);
     exportFolder.add(gui, 'oceanFloor').name('ocean floor (m)').onFinishChange(runAnalysis);
     exportFolder.add(gui, 'bitDepth', [16, 8]).name('bit depth');
     exportFolder.add(gui, 'fileName').name('file name');
@@ -408,14 +412,20 @@ map = (function () {
     return limitsFor(k, oceanFloor());
   }
 
-  // In-game level that puts a flat water surface under water. With ocean data the export carves below the level, so it can sit right on the surface.
-  function waterLevelFor(surface, k, carved) {
-    return Math.ceil(k * surface.top + (carved ? 0 : WATER_DEPTH));
+  // A flat water surface's in-game level, and the real height at or below which everything becomes water.
+  // Carving with ocean data lets the level be the highest whole meter that floods no land. Without it the level has to clear the surface.
+  function waterLineFor(surface, k, carved) {
+    if (!carved) {
+      var level = Math.ceil(k * surface.top + WATER_DEPTH);
+      return {level: level, waterline: level / k};
+    }
+    var waterline = surface.top + SHORE_TOLERANCE;
+    return {level: Math.floor(k * waterline), waterline: waterline};
   }
 
-  // Real meters: everything at or below an in-game water level ends WATER_DEPTH under it.
-  function submergeFor(level, k) {
-    return {level: level / k, top: (level - WATER_DEPTH) / k};
+  // Real meters for applyBathymetry: everything at or below the waterline ends WATER_DEPTH under the in-game level.
+  function submergeFor(level, waterline, k) {
+    return {level: waterline, top: (level - WATER_DEPTH) / k};
   }
 
   function setBoxWater(text) {
@@ -437,7 +447,9 @@ map = (function () {
           if (generation != analysisGeneration) throw new Error('superseded');
           return heightLimits(peak);
         },
-        submerge: previewSubmerge
+        submerge: previewSubmerge,
+        smoothing: gui.smoothing / GAME_METERS_PER_PIXEL,
+        outputWidth: out.width
       });
     } catch (e) {
       if (generation == analysisGeneration) setBoxWater(e.message);
@@ -453,9 +465,9 @@ map = (function () {
   function previewSubmerge(water, floodShare, areaKm2) {
     if (!gui.include_oceans) return null;
     var k = heightScale();
-    if (!gui.autoexpose) return submergeFor(Number(gui.waterLevel), k);
+    if (!gui.autoexpose) return submergeFor(Number(gui.waterLevel), Number(gui.waterLevel) / k, k);
     var choice = autoWaterChoice(waterChoices(water, k, floodShare, true), areaKm2);
-    return choice ? submergeFor(choice.level, k) : null;
+    return choice ? submergeFor(choice.level, choice.waterline, k) : null;
   }
 
   function autoWaterChoice(choices, areaKm2) {
@@ -468,10 +480,15 @@ map = (function () {
   function waterChoices(water, k, floodShare, carved) {
     var choices = [];
     water.forEach(function(w) {
-      var level = waterLevelFor(w, k, carved);
-      var same = choices.filter(function(c) { return c.level == level; })[0];
-      if (same) same.areaKm2 += w.areaKm2;
-      else choices.push({level: level, areaKm2: w.areaKm2, flood: floodShare(level / k)});
+      var line = waterLineFor(w, k, carved);
+      var same = choices.filter(function(c) { return c.level == line.level; })[0];
+      if (same) {
+        same.areaKm2 += w.areaKm2;
+        same.waterline = Math.max(same.waterline, line.waterline);
+        same.flood = floodShare(same.waterline);
+      } else {
+        choices.push({level: line.level, waterline: line.waterline, areaKm2: w.areaKm2, flood: floodShare(line.waterline)});
+      }
     });
     return choices.sort(function(a, b) { return b.areaKm2 - a.areaKm2; });
   }
@@ -536,7 +553,7 @@ map = (function () {
     var min = Math.max(GAME_MIN_HEIGHT, Math.floor(k * a.min));
     var max = Math.min(GAME_MAX_HEIGHT, Math.max(min + 1, Math.ceil(k * a.max)));
     var choice = autoWaterChoice(waterChoices(a.water, k, a.floodShare, carved), a.areaKm2);
-    return {k: k, min: min, max: max, water: choice ? choice.level : Math.max(GAME_MIN_HEIGHT, min - 1)};
+    return {k: k, min: min, max: max, water: choice ? choice.level : Math.max(GAME_MIN_HEIGHT, min - 1), waterline: choice ? choice.waterline : -Infinity};
   }
 
   function readHeights() {
@@ -688,7 +705,7 @@ map = (function () {
     var out = outputSize();
     return {
       bounds: exportBounds(), out: out, northLeft: northLeft(), image: imageSize(), mpp: metersPerPixel(),
-      name: exportName(), mapName: mapName(), climate: gui.climate, bitDepth: Number(gui.bitDepth),
+      name: exportName(), mapName: mapName(), climate: gui.climate, bitDepth: Number(gui.bitDepth), smoothing: gui.smoothing,
       auto: gui.autoexpose, oceans: gui.include_oceans, oceanFloor: needsHeights ? oceanFloor() : 0,
       requested: needsHeights ? requestedScale() : null, heights: needsHeights ? readHeights() : null, analysis: analysis,
       towns: {maxTowns: Math.round(gui.maxTowns), minSpacing: Number(gui.townSpacing), includeVillages: gui.includeVillages},
@@ -698,7 +715,7 @@ map = (function () {
 
   // Changes whenever the live fields would stop describing an export queued now.
   function viewKey() {
-    return JSON.stringify([exportBounds(), outputSize(), gui.scaleMode, requestedText, gui.autoexpose, gui.include_oceans, gui.oceanFloor]);
+    return JSON.stringify([exportBounds(), outputSize(), gui.scaleMode, requestedText, gui.autoexpose, gui.include_oceans, gui.oceanFloor, gui.smoothing]);
   }
 
   function exportName() {
@@ -710,8 +727,12 @@ map = (function () {
   }
 
   async function buildHeightmap(job, report) {
-    var h = Object.assign({}, job.heights);
-    var meta = {heightScale: h.k, waterLevel: h.water};
+    // The fields only hold the in-game water level, so auto mode takes the waterline from the analysis.
+    var h = job.auto && job.analysis ? heightsFor(job.analysis, job.heights.k, job.oceans) :
+      Object.assign({waterline: job.heights.water / job.heights.k}, job.heights);
+    var meta = {heightScale: h.k, waterLevel: h.water, smoothing: job.smoothing};
+    // A water level under the minimum means the map has no water, so nothing is carved and the level follows the final minimum.
+    var dry = h.water < h.min;
     report('Fetching elevation tiles...', 0);
     var result = await heightmapExport.render({
       bounds: job.bounds,
@@ -730,12 +751,16 @@ map = (function () {
       // Auto mode widens to whole in-game meters if full resolution finds a higher peak or lower point than the preview.
       range: function(lo, hi) {
         if (job.auto) {
+          var noWater = h.water < h.min;
           h.min = Math.max(GAME_MIN_HEIGHT, Math.min(h.min, Math.floor(h.k * lo)));
           h.max = Math.min(GAME_MAX_HEIGHT, Math.max(h.max, Math.ceil(h.k * hi)));
+          if (noWater) h.water = meta.waterLevel = Math.max(GAME_MIN_HEIGHT, h.min - 1);
         }
         return {min: h.min / h.k, max: h.max / h.k};
       },
-      submerge: job.oceans ? submergeFor(h.water, h.k) : null,
+      submerge: job.oceans && !dry ? submergeFor(h.water, h.waterline, h.k) : null,
+      smoothing: job.smoothing / GAME_METERS_PER_PIXEL,
+      waterLevel: dry ? -Infinity : h.waterline,
       northLeft: job.northLeft,
       meta: meta,
       onProgress: function(fraction) {
@@ -761,7 +786,8 @@ map = (function () {
     return [
       'Transport Fever import: Minimum Height ' + h.min + ', Maximum Height ' + h.max + ', Water Level ' + h.water,
       'height scale ' + h.k + ', ' + steepnessText(h.k, job.mpp) + 'x real steepness, real elevations ' + m.blackMeters.toFixed(2) + ' to ' + m.whiteMeters.toFixed(2) + ' m',
-      'water depth: ' + (m.bathymetry || 'ocean data off, below sea level clamped to 0 m'),
+      'water depth: ' + (m.bathymetry || (job.oceans ? 'no water on the map' : 'ocean data off, below sea level clamped to 0 m')) +
+        (job.smoothing ? ', land smoothed over ' + job.smoothing + ' in-game m' : ''),
       m.cappedFraction > 0 ? (m.cappedFraction * 100).toFixed(2) + '% of the map was above the game\'s ' + GAME_MAX_HEIGHT + ' m limit and was flattened. Lower the height scale to keep those peaks.' : null,
       'real ' + (job.mpp * (job.out.width - 1) / 1000).toFixed(2) + ' x ' + (job.mpp * (job.out.height - 1) / 1000).toFixed(2) + ' km at ' + m.metersPerPixel.toFixed(3) + ' m/px',
       'center ' + m.centerLat.toFixed(6) + ', ' + m.centerLng.toFixed(6),

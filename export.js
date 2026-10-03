@@ -548,6 +548,47 @@ var heightmapExport = (function () {
     return note;
   }
 
+  // A Gaussian-like blur of the land, sigma in pixels, from three box passes over normalized sums.
+  // Water at or below level is left out entirely, so no shoreline moves.
+  function smoothLand(heights, width, height, sigma, level) {
+    const r = Math.round((Math.sqrt(4 * sigma * sigma + 1) - 1) / 2);
+    if (r < 1) return;
+    const sum = new Float32Array(heights.length), weight = new Float32Array(heights.length);
+    for (let i = 0; i < heights.length; i++) {
+      if (heights[i] > level) {
+        sum[i] = heights[i];
+        weight[i] = 1;
+      }
+    }
+    for (let pass = 0; pass < 3; pass++) {
+      boxSum(sum, width, height, r);
+      boxSum(weight, width, height, r);
+    }
+    for (let i = 0; i < heights.length; i++) if (heights[i] > level) heights[i] = sum[i] / weight[i];
+  }
+
+  // Replaces each cell with the sum over the square of half-width r around it. Columns go in blocks to stay in cache.
+  function boxSum(grid, width, height, r) {
+    const line = new Float64Array(width + 1);
+    for (let y = 0; y < height; y++) {
+      const row = y * width;
+      for (let x = 0; x < width; x++) line[x + 1] = line[x] + grid[row + x];
+      for (let x = 0; x < width; x++) grid[row + x] = line[Math.min(x + r, width - 1) + 1] - line[Math.max(x - r, 0)];
+    }
+    const block = 32, sums = new Float64Array(block * (height + 1));
+    for (let x0 = 0; x0 < width; x0 += block) {
+      const span = Math.min(block, width - x0);
+      for (let y = 0; y < height; y++) {
+        const row = y * width + x0, from = y * block, to = from + block;
+        for (let b = 0; b < span; b++) sums[to + b] = sums[from + b] + grid[row + b];
+      }
+      for (let y = 0; y < height; y++) {
+        const row = y * width + x0, hi = (Math.min(y + r, height - 1) + 1) * block, lo = Math.max(y - r, 0) * block;
+        for (let b = 0; b < span; b++) grid[row + b] = sums[hi + b] - sums[lo + b];
+      }
+    }
+  }
+
   function highest(heights) {
     let peak = -Infinity;
     for (let i = 0; i < heights.length; i++) peak = Math.max(peak, heights[i]);
@@ -864,8 +905,9 @@ var heightmapExport = (function () {
   // Coarse pass for live feedback: extremes and water surfaces, without fetching full-resolution tiles.
   // limits(peak): given the highest point in meters, the {floor, ceiling} in meters that heights are clamped into.
   // submerge(water, floodShare, areaKm2): given the water surfaces found, the {level, top} in meters for applyBathymetry, or null.
+  // smoothing: as for render, in pixels of an image outputWidth wide.
   async function analyze(options) {
-    const {bounds, aspect, limits, submerge} = options;
+    const {bounds, aspect, limits, submerge, smoothing, outputWidth} = options;
     const region = boundsToRegion(bounds);
     const width = Math.max(2, Math.round(PREVIEW_SIZE * Math.min(1, aspect)));
     const height = Math.max(2, Math.round(PREVIEW_SIZE * Math.min(1, 1 / aspect)));
@@ -885,10 +927,9 @@ var heightmapExport = (function () {
     const areaKm2 = width * height * cellSize * cellSize / 1e6;
     const sea = submerge ? submerge(water, floodShare, areaKm2) : null;
     let bathymetry = null;
-    if (sea) {
-      bathymetry = await applyBathymetry(heights, width, height, region, sea);
-      extremes = clampAndMeasure(heights, floor, ceiling);
-    }
+    if (sea) bathymetry = await applyBathymetry(heights, width, height, region, sea);
+    if (smoothing) smoothLand(heights, width, height, smoothing * (width - 1) / (outputWidth - 1), sea ? sea.level : -Infinity);
+    if (sea || smoothing) extremes = clampAndMeasure(heights, floor, ceiling);
     return {
       min: extremes.lo, max: extremes.hi, groundWidth: groundWidth(region), areaKm2: areaKm2,
       water: water, floodShare: floodShare, bathymetry: bathymetry,
@@ -897,10 +938,11 @@ var heightmapExport = (function () {
   }
 
   // limits(peak): as for analyze. range(lo, hi): given the clamped data's extremes in meters, returns the {min, max} that map to black and white.
-  // submerge: the {level, top} in meters for applyBathymetry, or null.
+  // submerge: the {level, top} in meters for applyBathymetry, or null. smoothing: the blur's sigma in pixels, or 0.
+  // waterLevel: meters, anything at or below it stays out of the smoothing.
   // width and height are the region's, north up. northLeft turns the image a quarter left.
   async function render(options) {
-    const {bounds, width, height, bitDepth, range, limits, submerge, northLeft} = options;
+    const {bounds, width, height, bitDepth, range, limits, submerge, smoothing, waterLevel, northLeft} = options;
     const onProgress = options.onProgress || function () {};
     const onStage = options.onStage || function () {};
     const region = boundsToRegion(bounds);
@@ -911,6 +953,10 @@ var heightmapExport = (function () {
     if (submerge) {
       onStage('Fetching water depths...');
       bathymetry = await applyBathymetry(heights, width, height, region, submerge);
+    }
+    if (smoothing) {
+      onStage('Smoothing terrain...');
+      smoothLand(heights, width, height, smoothing, waterLevel);
     }
 
     const {floor, ceiling} = limits(highest(heights));
