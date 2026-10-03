@@ -9,6 +9,8 @@ map = (function () {
   var exporting = false;
   var analysis = null;
   var analysisGeneration = 0;
+  // The height scale the user typed. Auto mode may show a lower one so high peaks fit under the game's limit.
+  var requestedScale = '1';
   var exportFolder;
   var inputError = false;
   const exportDefaults = {lat: 39.109328, lng: -76.813227, metersPerPixel: 10};
@@ -169,7 +171,7 @@ map = (function () {
     // Text fields because this dat.gui version rounds number boxes to the precision of their initial value.
     gui.center = '';
     gui.metersPerPixel = String(exportDefaults.metersPerPixel);
-    gui.heightScale = '1';
+    gui.heightScale = requestedScale;
     gui.oceanFloor = String(GAME_MIN_HEIGHT);
     gui.bitDepth = 16;
     gui.fileName = 'heightmap';
@@ -180,6 +182,7 @@ map = (function () {
     exportFolder.add(gui, 'center').name('center (lat, lon)').onFinishChange(applyCenter);
     exportFolder.add(gui, 'metersPerPixel').name('real meters per pixel').onFinishChange(applyScale);
     exportFolder.add(gui, 'heightScale').name('height scale').onFinishChange(function() {
+      requestedScale = gui.heightScale;
       if (gui.autoexpose) runAnalysis();
       else applyManualHeights();
     });
@@ -323,8 +326,13 @@ map = (function () {
     return Math.max(floor, GAME_MIN_HEIGHT / heightScale());
   }
 
-  function heightCeiling() {
-    return GAME_MAX_HEIGHT / heightScale();
+  // Real-meter clamps for sampled heights. Auto mode first lowers the height scale just enough for the peak to fit under the game's limit.
+  function heightLimits(peak) {
+    if (gui.autoexpose) {
+      var k = Number(requestedScale);
+      gui.heightScale = String(k * peak > GAME_MAX_HEIGHT ? Math.floor(GAME_MAX_HEIGHT / peak * 1e4) / 1e4 : k);
+    }
+    return {floor: heightFloor(), ceiling: GAME_MAX_HEIGHT / heightScale()};
   }
 
   // In-game level that puts a flat water surface just under water.
@@ -341,14 +349,16 @@ map = (function () {
   async function runAnalysis() {
     var generation = ++analysisGeneration;
     try {
-      var floor = heightFloor();
       var out = outputSize();
       setBoxWater('measuring...');
       var result = await heightmapExport.analyze({
         bounds: exportBounds(),
         aspect: (out.width - 1) / (out.height - 1),
-        floor: floor,
-        ceiling: heightCeiling(),
+        // A superseded run must not change the height scale the newer one measures with.
+        limits: function(peak) {
+          if (generation != analysisGeneration) throw new Error('superseded');
+          return heightLimits(peak);
+        },
         bathymetryLevel: previewBathymetryLevel
       });
     } catch (e) {
@@ -398,15 +408,16 @@ map = (function () {
     var shown = waterChoices(analysis.water, k, analysis.floodShare).filter(function(c, i) { return i == 0 || c.areaKm2 >= 0.1; });
     var depthNote = analysis.bathymetry && /unavailable/.test(analysis.bathymetry) ? ' (' + analysis.bathymetry + ')' : '';
     var climate = suggestClimate(analysis);
-    var climateNote = climate ? '\nsuggested climate: ' + climate : '';
+    var notes = (climate ? '\nsuggested climate: ' + climate : '') + (gui.autoexpose && k < Number(requestedScale) ?
+      '\nheight scale lowered from ' + requestedScale + ' to ' + k + ' so the highest point fits under ' + GAME_MAX_HEIGHT : '');
     if (!shown.length) {
-      setBoxWater('no flat water surfaces found' + depthNote + climateNote);
+      setBoxWater('no flat water surfaces found' + depthNote + notes);
       return;
     }
     setBoxWater('water levels: ' + shown.slice(0, 4).map(function(c) {
       var flood = c.flood > MAX_FLOOD_SHARE ? ', floods ' + Math.round(c.flood * 100) + '% of the map' : '';
       return c.level + ' (' + c.areaKm2.toFixed(1) + ' km2' + flood + ')';
-    }).join(', ') + depthNote + climateNote);
+    }).join(', ') + depthNote + notes);
   }
 
   // A rule of thumb from latitude and natural land cover. No data, water, built area and cloud (Impact Observatory 0, 1, 7, 10) are left out.
@@ -513,8 +524,10 @@ map = (function () {
   }
 
   async function buildHeightmap() {
-    var floor = heightFloor();
+    // Fails fast on a bad ocean floor rather than after fetching every tile.
+    heightFloor();
     var h = readHeights();
+    var meta = {heightScale: h.k, waterLevel: h.water};
     var out = outputSize();
     setStatus('Fetching elevation tiles...');
     var result = await heightmapExport.render({
@@ -522,8 +535,16 @@ map = (function () {
       width: out.width,
       height: out.height,
       bitDepth: Number(gui.bitDepth),
-      floor: floor,
-      ceiling: heightCeiling(),
+      // Full resolution can find a higher peak than the preview, which moves the auto scale and the water level with it.
+      limits: function(peak) {
+        var scale = gui.heightScale, limits = heightLimits(peak);
+        if (gui.heightScale != scale && analysis) {
+          applyAnalysis();
+          h = readHeights();
+          Object.assign(meta, {heightScale: h.k, waterLevel: h.water});
+        }
+        return limits;
+      },
       // Auto mode widens to whole in-game meters if full resolution finds a higher peak or lower point than the preview.
       range: function(lo, hi) {
         if (gui.autoexpose) {
@@ -533,7 +554,7 @@ map = (function () {
         return {min: h.min / h.k, max: h.max / h.k};
       },
       bathymetryLevel: gui.include_oceans ? h.water / h.k : null,
-      meta: {heightScale: h.k, waterLevel: h.water},
+      meta: meta,
       onProgress: function(fraction) {
         setStatus('Fetching elevation tiles... ' + Math.round(fraction * 100) + '%');
       },
@@ -566,20 +587,32 @@ map = (function () {
   async function buildBiomes() {
     var h = readHeights();
     var out = outputSize();
-    return heightmapExport.renderBiomes({
-      bounds: exportBounds(),
+    var bounds = exportBounds();
+    var volcanoes = [];
+    if (gui.climate == 'Tropical') {
+      setStatus('Looking up volcanoes...');
+      volcanoes = await overpass.nodes(bounds, '["natural"="volcano"]');
+    }
+    var result = await heightmapExport.renderBiomes({
+      bounds: bounds,
       width: out.width,
       height: out.height,
       climate: gui.climate,
       waterLevel: h.water / h.k,
+      volcanoes: volcanoes,
       onStage: setStatus
     });
+    result.volcanoCount = volcanoes.length;
+    return result;
   }
 
   function biomeSummary(result) {
     return [
       'biomes 0-4: ' + result.biomeShares.map(function(v) { return (v * 100).toFixed(1) + '%'; }).join(', '),
-      result.layers.map(function(l) { return l.key + ' ' + (l.share * 100).toFixed(1) + '%'; }).join(', ')
+      result.layers.map(function(l) {
+        var source = l.key == 'volcano' ? ' from ' + result.volcanoCount + ' OpenStreetMap volcanoes' : '';
+        return l.key + ' ' + (l.share * 100).toFixed(1) + '%' + source;
+      }).join(', ')
     ];
   }
 

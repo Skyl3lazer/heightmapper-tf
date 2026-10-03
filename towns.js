@@ -4,15 +4,6 @@
 var townExport = (function () {
   'use strict';
 
-  // A keyed service from config.js first, then free public instances with global coverage.
-  const OVERPASS_URLS = [
-    configuredOverpass(),
-    'https://overpass.private.coffee/api/interpreter',
-    'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
-    'https://overpass-api.de/api/interpreter'
-  ].filter(Boolean);
-  const OVERPASS_TIMEOUT_MS = 60000;
-  const OVERPASS_HEDGE_MS = 20000;
   const GAME_METERS_PER_PIXEL = 4;
   // Matches the gap the game's own town generator leaves along the map edge.
   const EDGE_MARGIN = 800;
@@ -20,46 +11,6 @@ var townExport = (function () {
   const DEFAULT_POPULATION = {city: 50000, town: 10000, village: 1000};
   const COMMERCIAL_NEEDS = ['vegetables', 'fish', 'meat'];
   const INDUSTRIAL_NEEDS = ['bricks', 'planks', 'fuel'];
-
-  function configuredOverpass() {
-    const config = typeof heightmapperConfig === 'undefined' ? {} : heightmapperConfig;
-    return (config.overpassUrl || '').replace('{key}', encodeURIComponent(config.overpassKey || ''));
-  }
-
-  // A down or overloaded instance shouldn't stall the export, so the next one starts after a short wait or a failure.
-  function fetchPlaces(bounds, types) {
-    const body = new URLSearchParams({data: `[out:json][timeout:60];node["place"~"^(${types.join('|')})$"]` +
-      `(${bounds.south},${bounds.west},${bounds.north},${bounds.east});out;`});
-    const done = new AbortController();
-    const errors = [];
-    let next = 0, running = 0;
-    return new Promise((resolve, reject) => {
-      function launch() {
-        if (done.signal.aborted || next >= OVERPASS_URLS.length) return;
-        const url = OVERPASS_URLS[next++];
-        running++;
-        const hedge = setTimeout(launch, OVERPASS_HEDGE_MS);
-        fetch(url, {method: 'POST', body: body, signal: AbortSignal.any([done.signal, AbortSignal.timeout(OVERPASS_TIMEOUT_MS)])})
-          .then(response => {
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            return response.json();
-          })
-          .then(json => {
-            done.abort();
-            resolve(json.elements);
-          })
-          .catch(e => {
-            clearTimeout(hedge);
-            running--;
-            if (done.signal.aborted) return;
-            errors.push(`${new URL(url).host}: ${e.message}`);
-            if (next < OVERPASS_URLS.length) launch();
-            else if (running === 0) reject(new Error('OpenStreetMap place lookup failed (' + errors.join('; ') + ')'));
-          });
-      }
-      launch();
-    });
-  }
 
   function population(tags) {
     const count = parseInt(String(tags.population || '').replace(/[,\s]/g, ''), 10);
@@ -108,7 +59,8 @@ var townExport = (function () {
 
   async function build(options) {
     const {bounds, width, height, maxTowns, minSpacing, includeVillages} = options;
-    const places = await fetchPlaces(bounds, includeVillages ? ['city', 'town', 'village'] : ['city', 'town']);
+    const types = includeVillages ? 'city|town|village' : 'city|town';
+    const places = await overpass.nodes(bounds, `["place"~"^(${types})$"]`);
     const nw = heightmapExport.project(bounds.north, bounds.west);
     const se = heightmapExport.project(bounds.south, bounds.east);
     const halfX = (width - 1) / 2 * GAME_METERS_PER_PIXEL;

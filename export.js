@@ -26,12 +26,16 @@ var heightmapExport = (function () {
   const HILL_SLOPE = 10, MOUNTAIN_BIOME_SLOPE = 25, MOUNTAIN_MASK_SLOPE = 20;
   // In-game meters.
   const RIVER_MAX_WIDTH = 280;
-  // The masks each climate's biome import reads that can be derived from terrain and land cover.
-  // Dry's coast_hills, mesas and monument_valley and Tropical's volcano are landforms these sources can't identify.
+  // Real meters. Coast hills are land near the sea where this share of the land within HILL_AREA_RADIUS is steeper than HILL_SLOPE.
+  const COAST_HILLS_DISTANCE = 15000, HILL_AREA_RADIUS = 500, HILL_AREA_SHARE = 0.3;
+  // Real meters. The game's volcano covers the whole cone, so each OpenStreetMap volcano spreads down the hill slopes around it.
+  const SUMMIT_SEARCH_RADIUS = 1000, VOLCANO_SEED_RADIUS = 600, VOLCANO_RADIUS = 10000;
+  // The masks each climate's biome import reads that can be derived from terrain, land cover and OpenStreetMap.
+  // Dry's mesas and monument_valley are landforms these sources can't identify.
   const CLIMATE_LAYERS = {
     Temperate: ['mountains', 'rivers'],
-    Dry: ['mountains', 'rivers'],
-    Tropical: ['islands', 'mountains'],
+    Dry: ['coast_hills', 'mountains', 'rivers'],
+    Tropical: ['islands', 'mountains', 'volcano'],
     Subarctic: ['lakes', 'mountains', 'swamps']
   };
   const SEAM_FEATHER = 32;
@@ -488,6 +492,12 @@ var heightmapExport = (function () {
     return 'NOAA water depths applied';
   }
 
+  function highest(heights) {
+    let peak = -Infinity;
+    for (let i = 0; i < heights.length; i++) peak = Math.max(peak, heights[i]);
+    return peak;
+  }
+
   function clampAndMeasure(heights, floor, ceiling) {
     let lo = Infinity, hi = -Infinity, capped = 0;
     for (let i = 0; i < heights.length; i++) {
@@ -536,9 +546,9 @@ var heightmapExport = (function () {
   }
 
   // Biome map plus the climate's layer masks for Transport Fever 3's biome import, from land cover and terrain steepness.
-  // waterLevel: meters, anything at or below it is water.
+  // waterLevel: meters, anything at or below it is water. volcanoes: OpenStreetMap volcano nodes, {lat, lon}.
   async function renderBiomes(options) {
-    const {bounds, width, height, climate, waterLevel} = options;
+    const {bounds, width, height, climate, waterLevel, volcanoes} = options;
     const onStage = options.onStage || function () {};
     const region = boundsToRegion(bounds);
     const {width: gw, height: gh} = rasterSize(width, height);
@@ -551,18 +561,19 @@ var heightmapExport = (function () {
     const spacing = GAME_METERS_PER_PIXEL * (width - 1) / (gw - 1);
     const realSpacing = groundWidth(region) / (gw - 1);
     const biome = new Uint8Array(gw * gh), mountains = new Uint8Array(gw * gh), water = new Uint8Array(gw * gh);
+    const slope = new Float32Array(gw * gh);
     for (let y = 0; y < gh; y++) {
       for (let x = 0; x < gw; x++) {
         const i = y * gw + x;
         const dx = (heights[y * gw + Math.min(x + 1, gw - 1)] - heights[y * gw + Math.max(x - 1, 0)]) / 2;
         const dy = (heights[Math.min(y + 1, gh - 1) * gw + x] - heights[Math.max(y - 1, 0) * gw + x]) / 2;
-        const slope = Math.atan(Math.hypot(dx, dy) / realSpacing) * 180 / Math.PI;
+        slope[i] = Math.atan(Math.hypot(dx, dy) / realSpacing) * 180 / Math.PI;
         const lc = cover[i];
         water[i] = lc === LC_WATER || heights[i] <= waterLevel ? 1 : 0;
-        mountains[i] = slope > MOUNTAIN_MASK_SLOPE ? 1 : 0;
+        mountains[i] = slope[i] > MOUNTAIN_MASK_SLOPE ? 1 : 0;
         if (water[i]) biome[i] = 0;
-        else if (lc === LC_SNOW || slope > MOUNTAIN_BIOME_SLOPE) biome[i] = 4;
-        else if (lc === LC_BARE || slope > HILL_SLOPE) biome[i] = 3;
+        else if (lc === LC_SNOW || slope[i] > MOUNTAIN_BIOME_SLOPE) biome[i] = 4;
+        else if (lc === LC_BARE || slope[i] > HILL_SLOPE) biome[i] = 3;
         else if (lc === LC_TREES || (climate === 'Subarctic' && lc === LC_FLOODED)) biome[i] = 2;
         else biome[i] = 1;
       }
@@ -579,7 +590,16 @@ var heightmapExport = (function () {
       },
       lakes: () => water.map((w, i) => w && heights[i] > 1 ? 1 : 0),
       swamps: () => cover.map(c => c === LC_FLOODED ? 1 : 0),
-      islands: () => landNotTouchingEdge(water, gw, gh)
+      islands: () => landNotTouchingEdge(water, gw, gh),
+      coast_hills: () => {
+        const land = water.map(w => 1 - w);
+        const r = Math.max(1, Math.round(HILL_AREA_RADIUS / realSpacing));
+        const steep = boxMean(slope.map((s, i) => land[i] && s > HILL_SLOPE ? 1 : 0), gw, gh, r);
+        const landShare = boxMean(land, gw, gh, r);
+        const toSea = distanceTo(water.map((w, i) => w && heights[i] <= 1 ? 1 : 0), gw, gh);
+        return land.map((l, i) => l && toSea[i] * realSpacing <= COAST_HILLS_DISTANCE && steep[i] >= HILL_AREA_SHARE * landShare[i] ? 1 : 0);
+      },
+      volcano: () => growVolcanoes(volcanoes || [], region, heights, slope, water, gw, gh, realSpacing)
     };
 
     const columns = new Int32Array(width), rows = new Int32Array(height);
@@ -605,6 +625,76 @@ var heightmapExport = (function () {
       biomeShares: [0, 1, 2, 3, 4].map(b => share(biome, b)),
       layers: layers
     };
+  }
+
+  // Mean over the square of half-width r cells around each cell, from a summed-area table.
+  function boxMean(grid, width, height, r) {
+    const w1 = width + 1, table = new Float64Array(w1 * (height + 1));
+    for (let y = 0; y < height; y++) {
+      let row = 0;
+      for (let x = 0; x < width; x++) {
+        row += grid[y * width + x];
+        table[(y + 1) * w1 + x + 1] = table[y * w1 + x + 1] + row;
+      }
+    }
+    const mean = new Float32Array(width * height);
+    for (let y = 0; y < height; y++) {
+      const y0 = Math.max(0, y - r), y1 = Math.min(height, y + r + 1);
+      for (let x = 0; x < width; x++) {
+        const x0 = Math.max(0, x - r), x1 = Math.min(width, x + r + 1);
+        const sum = table[y1 * w1 + x1] - table[y0 * w1 + x1] - table[y1 * w1 + x0] + table[y0 * w1 + x0];
+        mean[y * width + x] = sum / ((x1 - x0) * (y1 - y0));
+      }
+    }
+    return mean;
+  }
+
+  // Land around each volcano's summit, grown downhill over slopes steeper than HILL_SLOPE up to VOLCANO_RADIUS.
+  // Only going downhill keeps the cone from spreading onto neighboring mountains.
+  function growVolcanoes(volcanoes, region, heights, slope, water, width, height, spacing) {
+    const mask = new Uint8Array(width * height);
+    const owner = new Int32Array(width * height);
+    const queue = new Int32Array(width * height);
+    const maxRadius = VOLCANO_RADIUS / spacing;
+    function within(cx, cy, radius, visit) {
+      for (let y = Math.max(0, Math.ceil(cy - radius)); y <= Math.min(height - 1, Math.floor(cy + radius)); y++) {
+        for (let x = Math.max(0, Math.ceil(cx - radius)); x <= Math.min(width - 1, Math.floor(cx + radius)); x++) {
+          if (!water[y * width + x] && Math.hypot(x - cx, y - cy) <= radius) visit(y * width + x);
+        }
+      }
+    }
+    volcanoes.forEach((v, n) => {
+      const id = n + 1;
+      // Growth starts at the highest land near the point, since OpenStreetMap points often sit on a flank or the crater floor.
+      let top = -1;
+      within((lngToX(v.lon) - region.x0) / (region.x1 - region.x0) * (width - 1),
+        (latToY(v.lat) - region.y0) / (region.y1 - region.y0) * (height - 1),
+        SUMMIT_SEARCH_RADIUS / spacing, i => { if (top < 0 || heights[i] > heights[top]) top = i; });
+      if (top < 0) return;
+      const cx = top % width, cy = (top - cx) / width;
+      let head = 0, tail = 0;
+      // Seeding the whole steep summit lets growth reach every flank past an uneven crater rim.
+      within(cx, cy, VOLCANO_SEED_RADIUS / spacing, i => {
+        if (i !== top && slope[i] <= HILL_SLOPE) return;
+        owner[i] = id;
+        queue[tail++] = i;
+      });
+      while (head < tail) {
+        const i = queue[head++];
+        mask[i] = 1;
+        const x = i % width, y = (i - x) / width;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const jx = x + dx, jy = y + dy, j = jy * width + jx;
+            if (jx < 0 || jy < 0 || jx >= width || jy >= height || owner[j] === id) continue;
+            if (water[j] || slope[j] <= HILL_SLOPE || heights[j] > heights[i] || Math.hypot(jx - cx, jy - cy) > maxRadius) continue;
+            owner[j] = id;
+            queue[tail++] = j;
+          }
+        }
+      }
+    });
+    return mask;
   }
 
   // Land masses that don't reach the edge of the map are islands.
@@ -634,9 +724,10 @@ var heightmapExport = (function () {
   }
 
   // Coarse pass for live feedback: extremes and water surfaces, without fetching full-resolution tiles.
+  // limits(peak): given the highest point in meters, the {floor, ceiling} in meters that heights are clamped into.
   // bathymetryLevel(water, floodShare, areaKm2): given the water surfaces found, the meters below which NOAA depths apply, or null.
   async function analyze(options) {
-    const {bounds, aspect, floor, ceiling, bathymetryLevel} = options;
+    const {bounds, aspect, limits, bathymetryLevel} = options;
     const region = boundsToRegion(bounds);
     const width = Math.max(2, Math.round(PREVIEW_SIZE * Math.min(1, aspect)));
     const height = Math.max(2, Math.round(PREVIEW_SIZE * Math.min(1, 1 / aspect)));
@@ -649,6 +740,7 @@ var heightmapExport = (function () {
     } catch (e) {
       cover = null;
     }
+    const {floor, ceiling} = limits(highest(heights));
     let extremes = clampAndMeasure(heights, floor, ceiling);
     const cellSize = groundWidth(region) / (width - 1);
     const {surfaces: water, floodShare} = findWaterSurfaces(heights, width, height, cellSize * cellSize, floor, ceiling, cover);
@@ -666,10 +758,10 @@ var heightmapExport = (function () {
     };
   }
 
-  // floor, ceiling: meters, heights are clamped into that span. range(lo, hi): given the data's extremes in meters, returns the {min, max} that map to black and white.
+  // limits(peak): as for analyze. range(lo, hi): given the clamped data's extremes in meters, returns the {min, max} that map to black and white.
   // bathymetryLevel: meters below which NOAA depths apply, or null.
   async function render(options) {
-    const {bounds, width, height, bitDepth, range, floor, ceiling, bathymetryLevel} = options;
+    const {bounds, width, height, bitDepth, range, limits, bathymetryLevel} = options;
     const onProgress = options.onProgress || function () {};
     const onStage = options.onStage || function () {};
     const region = boundsToRegion(bounds);
@@ -682,6 +774,7 @@ var heightmapExport = (function () {
       bathymetry = await applyBathymetry(heights, width, height, region, bathymetryLevel);
     }
 
+    const {floor, ceiling} = limits(highest(heights));
     const {lo, hi, capped} = clampAndMeasure(heights, floor, ceiling);
     const levels = range(lo, hi);
     const black = levels.min, white = levels.max;

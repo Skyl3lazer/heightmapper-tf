@@ -9,19 +9,26 @@ A fork of [tangrams/heightmapper](https://github.com/tangrams/heightmapper) that
 ### Usage
 
 1. Pick the map size, ratio and orientation in the "heightmap export" panel. The red box in the middle of the view shows the area that will be exported.
-2. Pan and zoom until the box covers the region you want. "center (lat, lon)" and "real meters per pixel" follow the map, and you can type into them to jump to an exact spot or scale.
-3. Click "export heightmap".
-4. In the game's Import Heightmap dialog, enter the "minimum height", "maximum height" and "water level" shown at the top of the panel.
+2. Pan and zoom until the box covers the region you want. 
+3. Customize any generator options such as climate, town count, etc.
+4. Click "export all" for a zip with the heightmap, biome maps and towns, laid out like the game's user folder. Extract it into `%APPDATA%\Transport Fever 3`. The individual export buttons save single files instead.
+5. In the map editor, create a map of the size and climate you've chosen.
+6. In the game's Import Heightmap dialog, enter the "minimum height", "maximum height" and "water level" shown at the top of the panel.
+7. Import the heightmap, biomes, and town files.
+8. Generate industries.
+
+You now have a fully playable map!
 
 Other controls:
 
-- maximum height, minimum height, water level: the values to enter in the game. With auto-exposure on they are measured from the area inside the box, or you can type your own.
-- The box label lists the water levels of the flat water surfaces it finds (seas, lakes, reservoirs), largest first, with their area. Transport Fever has a single water level, so pick the one you want and enter it in the game.
+- maximum height, minimum height, water level: the values to enter in the game. With auto-exposure on they are measured from the area inside the box, or you can type your own. The game accepts heights from -100 to 3177. Auto-exposure lowers the height scale just enough to fit the highest point under 3177. It returns to your scale when you move somewhere lower. With auto-exposure off, terrain above 3177 is flattened.
+- The box label lists the water levels of the flat water surfaces it finds (seas, lakes, reservoirs), largest first, with their area. Transport Fever has a single water level, so pick the one you want and enter it in the game. Auto-exposure picks the largest water body that doesn't flood the entire map, but it's not going to work in every situation.
 - climate: the Transport Fever 3 climate the map is for. The box label suggests one from the latitude and land cover inside the box.
-- export biomes: writes `<file name>_biomes.png`, `_mountains.png` and `_rivers.png` for Transport Fever 3's Biomes import, the same size as the heightmap. Biomes come from Esri's Sentinel-2 land cover and real-world slope. Put them in the game's biomes folder, import them after the heightmap, then generate industries in the editor so the game places them by biome. Browsers may ask to allow multiple downloads the first time.
+- export biomes: writes `<file name>_biomes.png` plus the climate's masks for Transport Fever 3's Biomes import, the same size as the heightmap. Temperate gets mountains and rivers, Dry gets coast hills, mountains and rivers, Tropical gets islands, mountains and volcanoes, and Subarctic gets lakes, mountains and swamps. Biomes come from Esri's Sentinel-2 land cover and real-world slope. Browsers may ask to allow multiple downloads the first time.
 - height scale: in-game height per real meter. 1 keeps real heights. Heights scale around sea level, so the sea stays at the water level.
 - include ocean data / ocean floor (m): Water below the water level takes its depth from NOAA's DEM Global Mosaic, which has real depths where the elevation tiles store water as a flat surface, and the ocean floor sets the lowest point allowed. With it off, everything below sea level is clamped to 0 m. The game's lowest minimum height is -100.
 - bit depth: 16-bit grayscale PNG with no alpha channel by default. 8-bit is also available but its height steps are coarse.
+- export all: runs the heightmap, biome and town exports and saves them together as `<file name>.zip`.
 - reference map: overlays OpenStreetMap for finding places.
 - screenshot: saves the current view as an 8-bit image for testing.
 - Press the "h" key to toggle UI visibility.
