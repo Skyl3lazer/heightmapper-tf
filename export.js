@@ -14,8 +14,18 @@ var heightmapExport = (function () {
   const MIN_WATER_CELLS = 25;
   const WATER_MERGE_METERS = 0.5;
   const BATHYMETRY_URL = 'https://gis.ngdc.noaa.gov/arcgis/rest/services/DEM_mosaics/DEM_global_mosaic/ImageServer/exportImage';
-  // Depth varies slowly, so it's fetched at most this many pixels across and interpolated up.
-  const BATHYMETRY_MAX_SIZE = 2049;
+  const LANDCOVER_URL = 'https://ic.imagery1.arcgis.com/arcgis/rest/services/Sentinel2_10m_LandCover/ImageServer/exportImage';
+  // Depth and land cover vary slowly next to the game's biome blending, so they're fetched at most this many pixels across.
+  const RASTER_MAX_SIZE = 2049;
+  // Impact Observatory land cover classes.
+  const LC_WATER = 1, LC_TREES = 2, LC_FLOODED = 4, LC_BARE = 8, LC_SNOW = 9;
+  // Transport Fever 3 writes biomes 0 to 4 as these gray levels.
+  const BIOME_GRAY = [0, 63, 127, 191, 255];
+  const GAME_METERS_PER_PIXEL = 4;
+  // Real-world slopes in degrees. The game's horizontal squeeze would make gentle land read as hills.
+  const HILL_SLOPE = 10, MOUNTAIN_BIOME_SLOPE = 25, MOUNTAIN_MASK_SLOPE = 20;
+  // In-game meters.
+  const RIVER_MAX_WIDTH = 280;
   const SEAM_FEATHER = 32;
   const SEAM_MEDIAN_RADIUS = 7;
   const SEAM_MIN_STEP = 0.1;
@@ -337,31 +347,36 @@ var heightmapExport = (function () {
       .sort((a, b) => b.areaKm2 - a.areaKm2);
   }
 
-  // NOAA's mosaic holds real water depth where the elevation tiles store water as a flat surface.
-  async function fetchBathymetry(region, width, height) {
+  // ArcGIS image services return raw pixels on exactly our grid when asked for band-sequential Web Mercator output.
+  async function fetchImageServer(url, region, width, height, pixelType, interpolation) {
     const span = 2 * Math.PI * 6378137;
     const dx = (region.x1 - region.x0) * span / (width - 1), dy = (region.y1 - region.y0) * span / (height - 1);
     const west = (region.x0 - 0.5) * span - dx / 2, east = (region.x1 - 0.5) * span + dx / 2;
     const south = (0.5 - region.y1) * span - dy / 2, north = (0.5 - region.y0) * span + dy / 2;
     const params = new URLSearchParams({
       bbox: [west, south, east, north].join(','), bboxSR: 3857, imageSR: 3857, size: width + ',' + height,
-      format: 'bsq', pixelType: 'F32', interpolation: 'RSP_BilinearInterpolation', f: 'image'
+      format: 'bsq', pixelType: pixelType, interpolation: interpolation, f: 'image'
     });
-    const response = await fetch(BATHYMETRY_URL + '?' + params, {signal: AbortSignal.timeout(120000)});
+    const response = await fetch(url + '?' + params, {signal: AbortSignal.timeout(120000)});
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const buffer = await response.arrayBuffer();
-    if (buffer.byteLength < width * height * 4) throw new Error('short response');
-    return new Float32Array(buffer, 0, width * height);
+    const floats = pixelType === 'F32';
+    if (buffer.byteLength < width * height * (floats ? 4 : 1)) throw new Error('short response');
+    return floats ? new Float32Array(buffer, 0, width * height) : new Uint8Array(buffer, 0, width * height);
+  }
+
+  function rasterSize(width, height) {
+    const scale = Math.min(1, (RASTER_MAX_SIZE - 1) / (Math.max(width, height) - 1));
+    return {width: Math.max(2, Math.round((width - 1) * scale) + 1), height: Math.max(2, Math.round((height - 1) * scale) + 1)};
   }
 
   // Everything at or below level (meters) is under water in game, so it takes NOAA's depth, never rising above the level.
   async function applyBathymetry(heights, width, height, region, level) {
     if (!heights.some(h => h <= level)) return 'no water below the water level';
-    const scale = Math.min(1, (BATHYMETRY_MAX_SIZE - 1) / (Math.max(width, height) - 1));
-    const bw = Math.max(2, Math.round((width - 1) * scale) + 1), bh = Math.max(2, Math.round((height - 1) * scale) + 1);
+    const {width: bw, height: bh} = rasterSize(width, height);
     let depth;
     try {
-      depth = await fetchBathymetry(region, bw, bh);
+      depth = await fetchImageServer(BATHYMETRY_URL, region, bw, bh, 'F32', 'RSP_BilinearInterpolation');
     } catch (e) {
       return 'NOAA water depths unavailable (' + e.message + ')';
     }
@@ -391,6 +406,99 @@ var heightmapExport = (function () {
     return {lo: lo, hi: hi};
   }
 
+  // Two-pass chamfer distance, in cells, from every cell to the nearest one where source is set.
+  function distanceTo(source, width, height) {
+    const d = new Float32Array(width * height);
+    for (let i = 0; i < d.length; i++) d[i] = source[i] ? 0 : Infinity;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x;
+        let v = d[i];
+        if (x > 0) v = Math.min(v, d[i - 1] + 1);
+        if (y > 0) {
+          v = Math.min(v, d[i - width] + 1);
+          if (x > 0) v = Math.min(v, d[i - width - 1] + Math.SQRT2);
+          if (x < width - 1) v = Math.min(v, d[i - width + 1] + Math.SQRT2);
+        }
+        d[i] = v;
+      }
+    }
+    for (let y = height - 1; y >= 0; y--) {
+      for (let x = width - 1; x >= 0; x--) {
+        const i = y * width + x;
+        let v = d[i];
+        if (x < width - 1) v = Math.min(v, d[i + 1] + 1);
+        if (y < height - 1) {
+          v = Math.min(v, d[i + width] + 1);
+          if (x < width - 1) v = Math.min(v, d[i + width + 1] + Math.SQRT2);
+          if (x > 0) v = Math.min(v, d[i + width - 1] + Math.SQRT2);
+        }
+        d[i] = v;
+      }
+    }
+    return d;
+  }
+
+  // Biome, mountain and river masks for Transport Fever 3's biome import, from land cover plus terrain steepness.
+  // waterLevel: meters, anything at or below it is water.
+  async function renderBiomes(options) {
+    const {bounds, width, height, climate, waterLevel} = options;
+    const onStage = options.onStage || function () {};
+    const region = boundsToRegion(bounds);
+    const {width: gw, height: gh} = rasterSize(width, height);
+
+    onStage('Fetching elevation tiles...');
+    const heights = await sampleRegion(region, gw, gh, pickZoom(region.x1 - region.x0, gw, 1), function () {});
+    onStage('Fetching land cover...');
+    const cover = await fetchImageServer(LANDCOVER_URL, region, gw, gh, 'U8', 'RSP_NearestNeighbor');
+
+    const spacing = GAME_METERS_PER_PIXEL * (width - 1) / (gw - 1);
+    const realSpacing = groundWidth(region) / (gw - 1);
+    const biome = new Uint8Array(gw * gh), mountains = new Uint8Array(gw * gh), water = new Uint8Array(gw * gh);
+    for (let y = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++) {
+        const i = y * gw + x;
+        const dx = (heights[y * gw + Math.min(x + 1, gw - 1)] - heights[y * gw + Math.max(x - 1, 0)]) / 2;
+        const dy = (heights[Math.min(y + 1, gh - 1) * gw + x] - heights[Math.max(y - 1, 0) * gw + x]) / 2;
+        const slope = Math.atan(Math.hypot(dx, dy) / realSpacing) * 180 / Math.PI;
+        const lc = cover[i];
+        water[i] = lc === LC_WATER || heights[i] <= waterLevel ? 1 : 0;
+        mountains[i] = slope > MOUNTAIN_MASK_SLOPE ? 1 : 0;
+        if (water[i]) biome[i] = 0;
+        else if (lc === LC_SNOW || slope > MOUNTAIN_BIOME_SLOPE) biome[i] = 4;
+        else if (lc === LC_BARE || slope > HILL_SLOPE) biome[i] = 3;
+        else if (lc === LC_TREES || (climate === 'Subarctic' && lc === LC_FLOODED)) biome[i] = 2;
+        else biome[i] = 1;
+      }
+    }
+
+    // Rivers are the water that a morphological opening removes: anything narrower than RIVER_MAX_WIDTH.
+    const radius = RIVER_MAX_WIDTH / 2 / spacing;
+    const toLand = distanceTo(water.map(w => 1 - w), gw, gh);
+    const toCore = distanceTo(toLand.map(d => d > radius ? 1 : 0), gw, gh);
+    const rivers = water.map((w, i) => w && toCore[i] > radius ? 1 : 0);
+
+    const columns = new Int32Array(width), rows = new Int32Array(height);
+    for (let i = 0; i < width; i++) columns[i] = Math.round(i * (gw - 1) / (width - 1));
+    for (let j = 0; j < height; j++) rows[j] = Math.round(j * (gh - 1) / (height - 1));
+    async function encode(grid, gray) {
+      const samples = new Uint8Array(width * height);
+      for (let j = 0; j < height; j++) {
+        const row = rows[j] * gw;
+        for (let i = 0; i < width; i++) samples[j * width + i] = gray[grid[row + columns[i]]];
+      }
+      return encodeGrayPng(samples, width, height, 8, {});
+    }
+    onStage('Writing biome maps...');
+    const share = (grid, value) => grid.reduce((n, v) => n + (v === value ? 1 : 0), 0) / grid.length;
+    return {
+      biomes: await encode(biome, BIOME_GRAY),
+      mountains: await encode(mountains, [0, 255]),
+      rivers: await encode(rivers, [0, 255]),
+      shares: {biomes: [0, 1, 2, 3, 4].map(b => share(biome, b)), mountains: share(mountains, 1), rivers: share(rivers, 1)}
+    };
+  }
+
   // Coarse pass for live feedback: extremes and water surfaces, without fetching full-resolution tiles.
   // bathymetryLevel(water): given the flat water surfaces found, the meters below which NOAA depths apply, or null.
   async function analyze(options) {
@@ -408,7 +516,18 @@ var heightmapExport = (function () {
       bathymetry = await applyBathymetry(heights, width, height, region, level);
       extremes = clampAndMeasure(heights, floor);
     }
-    return {min: extremes.lo, max: extremes.hi, groundWidth: groundWidth(region), water: water, bathymetry: bathymetry};
+    let landCover = null;
+    try {
+      const cover = await fetchImageServer(LANDCOVER_URL, region, width, height, 'U8', 'RSP_NearestNeighbor');
+      landCover = {};
+      for (let i = 0; i < cover.length; i++) landCover[cover[i]] = (landCover[cover[i]] || 0) + 1 / cover.length;
+    } catch (e) {
+      landCover = null;
+    }
+    return {
+      min: extremes.lo, max: extremes.hi, groundWidth: groundWidth(region), water: water, bathymetry: bathymetry,
+      landCover: landCover, centerLat: yToLat((region.y0 + region.y1) / 2)
+    };
   }
 
   // floor: meters, anything lower is raised to it. range(lo, hi): given the data's extremes in meters, returns the {min, max} that map to black and white.
@@ -461,6 +580,7 @@ var heightmapExport = (function () {
       return groundWidth(boundsToRegion(bounds));
     },
     analyze: analyze,
-    render: render
+    render: render,
+    renderBiomes: renderBiomes
   };
 }());

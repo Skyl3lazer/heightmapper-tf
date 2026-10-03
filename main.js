@@ -13,6 +13,7 @@ map = (function () {
   var inputError = false;
   const exportDefaults = {lat: 39.109328, lng: -76.813227, metersPerPixel: 10};
   const RATIOS = ['1:1', '1:2', '1:3', '1:4', '1:5'];
+  const CLIMATES = ['Temperate', 'Dry', 'Tropical', 'Subarctic'];
   // Lowest Minimum Height the game's import dialog accepts.
   const GAME_MIN_HEIGHT = -100;
   // Official in-game size in km, [short side, long side], for each ratio 1:1 to 1:5.
@@ -157,6 +158,7 @@ map = (function () {
     
     exportFolder = gui.addFolder('heightmap export');
     gui.mapSize = 'Gigantomaniac (TF3)';
+    gui.climate = CLIMATES[0];
     gui.ratio = RATIOS[0];
     gui.orientation = 'portrait';
     // Text fields because this dat.gui version rounds number boxes to the precision of their initial value.
@@ -167,6 +169,7 @@ map = (function () {
     gui.bitDepth = 16;
     gui.fileName = 'heightmap';
     exportFolder.add(gui, 'mapSize', Object.keys(MAP_SIZES)).name('map size').onChange(updateExportBox);
+    exportFolder.add(gui, 'climate', CLIMATES).name('climate');
     exportFolder.add(gui, 'ratio', RATIOS).name('ratio').onChange(regionChanged);
     exportFolder.add(gui, 'orientation', ['portrait', 'landscape']).name('orientation').onChange(regionChanged);
     exportFolder.add(gui, 'center').name('center (lat, lon)').onFinishChange(applyCenter);
@@ -182,6 +185,11 @@ map = (function () {
     gui.exportHeightmap = function () { exportRegion(); };
     exportFolder.add(gui, 'exportHeightmap').name('export heightmap');
     exportFolder.open();
+
+    var biomeFolder = gui.addFolder('biome export');
+    gui.exportBiomes = function () { exportBiomeMaps(); };
+    biomeFolder.add(gui, 'exportBiomes').name('export biomes');
+    biomeFolder.open();
 
     var townFolder = gui.addFolder('town export');
     gui.maxTowns = 65;
@@ -370,13 +378,30 @@ map = (function () {
     }
     var shown = waterChoices(analysis.water, k).filter(function(c, i) { return i == 0 || c.areaKm2 >= 0.1; });
     var depthNote = analysis.bathymetry && /unavailable/.test(analysis.bathymetry) ? ' (' + analysis.bathymetry + ')' : '';
+    var climate = suggestClimate(analysis);
+    var climateNote = climate ? '\nsuggested climate: ' + climate : '';
     if (!shown.length) {
-      setBoxWater('no flat water surfaces found' + depthNote);
+      setBoxWater('no flat water surfaces found' + depthNote + climateNote);
       return;
     }
     setBoxWater('water levels: ' + shown.slice(0, 4).map(function(c) {
       return c.level + ' (' + c.areaKm2.toFixed(1) + ' km2)';
-    }).join(', ') + depthNote);
+    }).join(', ') + depthNote + climateNote);
+  }
+
+  // A rule of thumb from latitude and natural land cover. Water, built area and cloud (Impact Observatory 1, 7, 10) are left out.
+  function suggestClimate(a) {
+    if (!a.landCover) return null;
+    var c = a.landCover;
+    var natural = 1 - (c[1] || 0) - (c[7] || 0) - (c[10] || 0);
+    if (natural < 0.05) return null;
+    var trees = (c[2] || 0) / natural, crops = (c[5] || 0) / natural;
+    var dryland = ((c[8] || 0) + (c[11] || 0)) / natural;
+    var lat = Math.abs(a.centerLat);
+    if (lat >= 58 || (lat >= 50 && trees > 0.5 && crops < 0.1)) return 'Subarctic';
+    if (dryland > 0.6 && trees < 0.15) return 'Dry';
+    if (lat < 23.5) return 'Tropical';
+    return 'Temperate';
   }
 
   function applyAnalysis() {
@@ -529,6 +554,39 @@ map = (function () {
       ].join('\n'));
     } catch (e) {
       setStatus('Town export failed: ' + e.message);
+      console.error(e);
+    } finally {
+      exporting = false;
+    }
+  }
+
+  async function exportBiomeMaps() {
+    if (exporting) return;
+    exporting = true;
+    try {
+      var h = readHeights();
+      var out = outputSize();
+      var result = await heightmapExport.renderBiomes({
+        bounds: exportBounds(),
+        width: out.width,
+        height: out.height,
+        climate: gui.climate,
+        waterLevel: h.water / h.k,
+        onStage: setStatus
+      });
+      var name = gui.fileName || 'heightmap';
+      saveAs(result.biomes, name + '_biomes.png');
+      saveAs(result.mountains, name + '_mountains.png');
+      saveAs(result.rivers, name + '_rivers.png');
+      var s = result.shares;
+      setStatus([
+        'Saved ' + name + '_biomes.png, ' + name + '_mountains.png and ' + name + '_rivers.png, ' + out.width + 'x' + out.height + ', ' + gui.climate,
+        'biomes 0-4: ' + s.biomes.map(function(v) { return (v * 100).toFixed(1) + '%'; }).join(', '),
+        'mountains ' + (s.mountains * 100).toFixed(1) + '%, rivers ' + (s.rivers * 100).toFixed(1) + '%',
+        'Put them in the game\'s biomes folder and import them after the heightmap.'
+      ].join('\n'));
+    } catch (e) {
+      setStatus('Biome export failed: ' + e.message);
       console.error(e);
     } finally {
       exporting = false;

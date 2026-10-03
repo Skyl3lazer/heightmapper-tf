@@ -17,6 +17,8 @@ Other controls:
 
 - maximum height, minimum height, water level: the values to enter in the game. With auto-exposure on they are measured from the area inside the box, or you can type your own.
 - The box label lists the water levels of the flat water surfaces it finds (seas, lakes, reservoirs), largest first, with their area. Transport Fever has a single water level, so pick the one you want and enter it in the game.
+- climate: the Transport Fever 3 climate the map is for. The box label suggests one from the latitude and land cover inside the box.
+- export biomes: writes `<file name>_biomes.png`, `_mountains.png` and `_rivers.png` for Transport Fever 3's Biomes import, the same size as the heightmap. Biomes come from Esri's Sentinel-2 land cover and real-world slope. Put them in the game's biomes folder, import them after the heightmap, then generate industries in the editor so the game places them by biome. Browsers may ask to allow multiple downloads the first time.
 - height scale: in-game height per real meter. 1 keeps real heights. Heights scale around sea level, so the sea stays at the water level.
 - include ocean data / ocean floor (m): Water below the water level takes its depth from NOAA's DEM Global Mosaic, which has real depths where the elevation tiles store water as a flat surface, and the ocean floor sets the lowest point allowed. With it off, everything below sea level is clamped to 0 m. The game's lowest minimum height is -100.
 - bit depth: 16-bit grayscale PNG with no alpha channel by default. 8-bit is also available but its height steps are coarse.
