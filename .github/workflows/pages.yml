@@ -23,6 +23,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions/configure-pages@v6
+      - name: Write config.js from repository secrets
+        env:
+          OVERPASS_URL: ${{ secrets.OVERPASS_URL }}
+          OVERPASS_KEY: ${{ secrets.OVERPASS_KEY }}
+        run: |
+          node -e 'console.log("var heightmapperConfig = " + JSON.stringify({overpassUrl: process.env.OVERPASS_URL || "", overpassKey: process.env.OVERPASS_KEY || ""}) + ";")' > config.js
       - uses: actions/upload-pages-artifact@v5
         with:
           path: .

@@ -393,6 +393,10 @@ var heightmapExport = (function () {
   }
 
   return {
+    // Normalized Web Mercator: x and y run 0 to 1 from the west and north edges of the world.
+    project: function (lat, lng) {
+      return {x: lngToX(lng), y: latToY(lat)};
+    },
     groundWidth: function (bounds) {
       return groundWidth(boundsToRegion(bounds));
     },

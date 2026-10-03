@@ -38,6 +38,13 @@ The site is static and is published to GitHub Pages by `.github/workflows/pages.
 
 One-time setup: in the repository's Settings, open Pages and set "Source" to "GitHub Actions". After the next push to `main`, or a manual run of the "Publish to GitHub Pages" workflow from the Actions tab, the site is live at https://skyl3lazer.github.io/heightmapper-tf/.
 
+Town export looks up places through a keyed Overpass service when one is configured, and falls back to the free public Overpass instances otherwise. To configure it, add two environment secrets to the `github-pages` environment (Settings, Environments, github-pages):
+
+- `OVERPASS_URL`: the service URL, with `{key}` where the key goes, e.g. `https://overpass.nextgis.com/{key}/api/interpreter`.
+- `OVERPASS_KEY`: the API key.
+
+The workflow writes them into `config.js` when it publishes. The site has no server, so the published `config.js` is readable by anyone who visits the page. The secrets only keep the key out of the repository.
+
 ### To run locally:
 
 Start a web server in the repo's directory:
@@ -49,6 +56,8 @@ If running this produces CORS errors on your local machine, try:
     python run-server.py
 
 Then navigate to: [http://localhost:8000](http://localhost:8000)
+
+To use a keyed Overpass service locally, copy `config.example.js` to `config.js` and fill it in. Git ignores `config.js`. Without it, town export uses the public instances.
 
 [![AI-DECLARATION: copilot](https://img.shields.io/badge/䷼%20AI--DECLARATION-copilot-fee2e2?labelColor=fee2e2)](https://ai-declaration.md)
 

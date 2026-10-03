@@ -114,6 +114,7 @@ map = (function () {
     maxZoom: 19,
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>'
   });
+  var townLayer = L.layerGroup();
 
   // Create dat GUI
   var gui;
@@ -181,7 +182,18 @@ map = (function () {
     gui.exportHeightmap = function () { exportRegion(); };
     exportFolder.add(gui, 'exportHeightmap').name('export heightmap');
     exportFolder.open();
-    
+
+    var townFolder = gui.addFolder('town export');
+    gui.maxTowns = 65;
+    gui.townSpacing = 1200;
+    gui.includeVillages = true;
+    townFolder.add(gui, 'maxTowns', 1, 300).step(1).name('max towns');
+    townFolder.add(gui, 'townSpacing', 0, 5000).step(50).name('min town spacing (m)');
+    townFolder.add(gui, 'includeVillages').name('include villages');
+    gui.exportTowns = function () { exportTowns(); };
+    townFolder.add(gui, 'exportTowns').name('export towns');
+    townFolder.open();
+
     gui.help = function () {
       // show help screen and input blocker
       toggleHelp(true);
@@ -245,8 +257,9 @@ map = (function () {
     }
     showInputError(null);
     var mpp = metersPerPixel();
-    map.setView(c, map.getZoom(), {animate: false});
-    map.setZoom(map.getZoom() + Math.log2(metersPerPixel() / mpp), {animate: false});
+    // A reset keeps the exact center. Without it Leaflet pans by whole screen pixels.
+    map.setView(c, map.getZoom(), {reset: true});
+    map.setView(c, map.getZoom() + Math.log2(metersPerPixel() / mpp), {reset: true});
   }
 
   function applyScale() {
@@ -256,7 +269,7 @@ map = (function () {
       return;
     }
     showInputError(null);
-    map.setZoom(map.getZoom() + Math.log2(metersPerPixel() / target), {animate: false});
+    map.setView(map.getCenter(), map.getZoom() + Math.log2(metersPerPixel() / target), {reset: true});
   }
   
   function regionChanged() {
@@ -470,6 +483,40 @@ map = (function () {
     }
   }
   
+  async function exportTowns() {
+    if (exporting) return;
+    exporting = true;
+    try {
+      var out = outputSize();
+      setStatus('Looking up towns...');
+      var result = await townExport.build({
+        bounds: exportBounds(),
+        width: out.width,
+        height: out.height,
+        maxTowns: Math.round(gui.maxTowns),
+        minSpacing: Number(gui.townSpacing),
+        includeVillages: gui.includeVillages
+      });
+      saveAs(new Blob([result.lua], {type: 'text/plain'}), (gui.fileName || 'heightmap') + '_towns.lua');
+      townLayer.clearLayers().addTo(map);
+      result.towns.forEach(function(t) {
+        L.circleMarker([t.lat, t.lng], {radius: 4, color: '#ffcc00', weight: 2, fillOpacity: 0.8})
+          .bindTooltip(t.name + ', size ' + t.size)
+          .addTo(townLayer);
+      });
+      var names = result.towns.map(function(t) { return t.name; });
+      setStatus([
+        'Saved ' + result.towns.length + ' towns, chosen from ' + result.candidates + ' places inside the map',
+        names.slice(0, 10).join(', ') + (names.length > 10 ? ', ...' : '')
+      ].join('\n'));
+    } catch (e) {
+      setStatus('Town export failed: ' + e.message);
+      console.error(e);
+    } finally {
+      exporting = false;
+    }
+  }
+
   // show and hide help screen
   function toggleHelp(active) {
     var visibility = active ? "visible" : "hidden";
