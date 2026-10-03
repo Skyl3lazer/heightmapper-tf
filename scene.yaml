@@ -1,18 +1,9 @@
 sources:
     elevation:
         type: Raster
-        url: https://tile.nextzen.org/tilezen/terrain/v1/512/terrarium/{z}/{x}/{y}.png
-        max_zoom: 14
-        tile_size: 512
-        url_params:
-            api_key: dmlO1fVQRPKI-GrVIYJ1YA
-    mapzen:
-        type: MVT
-        url: https://tile.nextzen.org/tilezen/vector/v1/512/all/{z}/{x}/{y}.mvt
-        max_zoom: 16
-        tile_size: 512
-        url_params:
-            api_key: dmlO1fVQRPKI-GrVIYJ1YA
+        url: https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png
+        max_zoom: 15
+        tile_size: 256
 styles:
     hillshade:
         base: raster
@@ -39,24 +30,6 @@ styles:
 
                     color.rgb = vec3(new_value);
                     color.a = 1.0;
-    togglelines:
-        base: lines
-        blend: overlay
-        shaders:
-            uniforms:
-                u_alpha: .0
-            blocks:
-                color:
-                    color.a *= u_alpha;
-    toggletext:
-        base: text
-        blend: overlay
-        shaders:
-            uniforms:
-                u_alpha: .0
-            blocks:
-                color:
-                    color.a *= u_alpha;
 
 layers:
     terrain:
@@ -64,64 +37,3 @@ layers:
         draw:
             hillshade:
                 order: 0
-    water:
-        data: { source: mapzen }
-        draw:
-            toggletext:
-                order: 1
-                buffer: 30px
-                font:
-                    family: Arial
-                    size: 10px
-                    fill: [0, .5, .5]
-        ocean:
-            filter:
-                kind: ocean
-            draw:
-                togglelines:
-                    order: 2
-                    width: 1.5px
-                    color: [0, 1, 1]
-        other:
-            filter:
-                not:
-                    kind: ocean
-            draw:
-                togglelines:
-                    order: 2
-                    width: .5px
-                    color: [0, .5, .5]
-    boundaries:
-        data: { source: mapzen }
-        country:
-            filter:
-                kind: country
-            draw:
-                togglelines:
-                    order: 3
-                    width: 1px
-                    color: [0, 1, 1]
-        state:
-            filter:
-                kind: state
-            draw:
-                togglelines:
-                    order: 3
-                    width: 1px
-                    color: [0, .5, .5]
-    roads:
-        data: { source: mapzen }
-        draw:
-            togglelines:
-                order: 3
-                width: .25px
-                color: [0, .5, .5]
-    places:
-        data: { source: mapzen }
-        draw:
-            toggletext:
-                order: 4
-                font:
-                    family: Arial
-                    size: 10px
-                    fill: cyan

@@ -1,45 +1,46 @@
-# heightmapper
+# heightmapper-tf
 
-http://tangrams.github.io/heightmapper
+https://skyl3lazer.github.io/heightmapper-tf/
 
-Heightmapper is an interactive grayscale heightmap browser, which can generate heightmaps for use in 3D applications. By default, it "auto-exposes" the display so that the highest visible elevation in the current view will be white, and the lowest will be black.
-
-Uses [Mapzen's](http://mapzen.com/tangrams/tangram) global [elevation service](https://mapzen.com/blog/elevation).
+A fork of [tangrams/heightmapper](https://github.com/tangrams/heightmapper) that exports real-world terrain as heightmaps for Transport Fever 2 and Transport Fever 3.
 
 <img width="900" alt="screen shot 2016-07-19 at 11 17 17 am" src="https://cloud.githubusercontent.com/assets/459970/16955404/6e9ec51e-4da2-11e6-97e1-d43d2682e07b.png">
 
 ### Usage
 
-- Uncheck "auto-expose" to set min and max height levels manually.
-- Check "show lines" and "show labels" to see more map data.
-- Click "export" to open the current view as an image in a new tab - "Save As" to save the image to disk.
-- Import the resulting image as a "displacement map" in a 3D application to generate a 3D model of the terrain. ([Here's a tutorial for doing this in Blender.](https://github.com/tangrams/heightmapper/blob/master/exporting_to_blender.md))
-- The "z:x scale factor" describes how "high" the current view is, on the z-axis, in terms of how wide the current view is on the x-axis. Multiplying this scale factor by the width of a 3D mesh in units x will tell you how high in units z your mesh should be after displacement in order to be true-scale.
+1. Pick the map size, ratio and orientation in the "heightmap export" panel. The red box in the middle of the view shows the area that will be exported.
+2. Pan and zoom until the box covers the region you want. "center (lat, lon)" and "real meters per pixel" follow the map, and you can type into them to jump to an exact spot or scale.
+3. Click "export heightmap".
+4. In the game's Import Heightmap dialog, enter the "minimum height", "maximum height" and "water level" shown at the top of the panel.
+
+Other controls:
+
+- maximum height, minimum height, water level: the values to enter in the game. With auto-exposure on they are measured from the area inside the box, or you can type your own.
+- The box label lists the water levels of the flat water surfaces it finds (seas, lakes, reservoirs), largest first, with their area. Transport Fever has a single water level, so pick the one you want and enter it in the game.
+- height scale: in-game height per real meter. 1 keeps real heights. Heights scale around sea level, so the sea stays at the water level.
+- include ocean data / ocean floor (m): with ocean data on, set the lowest point of the ocean. With it off, everything below sea level is clamped to 0 m. The game's lowest minimum height is -100.
+- bit depth: 16-bit grayscale PNG with no alpha channel by default. 8-bit is also available but its height steps are coarse.
+- reference map: overlays OpenStreetMap for finding places.
+- screenshot: saves the current view as an 8-bit image for testing.
 - Press the "h" key to toggle UI visibility.
 
-### Rendering
+Images generate at 256 px per in-game km plus 1 on each axis, e.g. 7169 x 7169 for a 28 x 28 km Gigantomaniac map.
 
-- Render Multiplier (1 - 8) will split the view up into that number of cells on the x and y axis. i.e., a Render Multiplier of 4 will render a 4x4 grid.
-- Render Name is the name of the output file you want.
-- render will automatically zoom to each area and stitch together a high quality render, then save the render as `{render name}.png` to your downloads.
+The live values come from a coarse preview of the box. If the full-resolution export finds a higher peak or a lower point, it widens the range and updates the fields, so always enter the values shown after the export. The bottom-left panel also shows those values, and the PNG's `Description` text chunk stores them as JSON.
 
-> This comes with a gotcha: the map must take up the entire view (no whitespace above or below) for the renderer to work properly.
->
-> Do not resize the view or move the map during render as this will interfere with the render process.
+Water levels can only be found where the elevation data stores water as perfectly flat surfaces. Generally this exists for lakes, reservoirs, rivers and the sea.
 
-### Todo
+Elevation data comes from the [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) open dataset (terrarium encoding, zoom 0-15, no API key). The tiles contain a few known bad patches with wrong values, mostly along coastlines, but they'll generally get smoothed out when you export. Neighboring tiles are sometimes built from different surveys, which leaves straight steps along their shared edges. The export also measures those steps and blends them out.
 
-- add a GeoTIFF export option which includes metadata
-- fix Render Multiplier issue when the view bounds exceeds the tile latitude limit.
-- **Super Extra Credit:** further export options including lat/lon bounding boxes, country/boundary masking using OSM vector tiles
+### Publishing
+
+The site is static and is published to GitHub Pages by `.github/workflows/pages.yml` on every push to `main`.
+
+One-time setup: in the repository's Settings, open Pages and set "Source" to "GitHub Actions". After the next push to `main`, or a manual run of the "Publish to GitHub Pages" workflow from the Actions tab, the site is live at https://skyl3lazer.github.io/heightmapper-tf/.
 
 ### To run locally:
 
 Start a web server in the repo's directory:
-
-    python -m SimpleHTTPServer 8000
-    
-If that doesn't work, try:
 
     python -m http.server 8000
 
@@ -47,8 +48,8 @@ If running this produces CORS errors on your local machine, try:
 
     python run-server.py
 
-or
-
-    python3 run-server.py (on mac)
-    
 Then navigate to: [http://localhost:8000](http://localhost:8000)
+
+[![AI-DECLARATION: copilot](https://img.shields.io/badge/䷼%20AI--DECLARATION-copilot-fee2e2?labelColor=fee2e2)](https://ai-declaration.md)
+
+*This declaration applies only to the fork's content. See [AI-DECLARATION.md](AI-DECLARATION.md) for specifics.*
