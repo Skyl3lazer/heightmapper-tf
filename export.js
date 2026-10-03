@@ -18,7 +18,7 @@ var heightmapExport = (function () {
   // Depth and land cover vary slowly next to the game's biome blending, so they're fetched at most this many pixels across.
   const RASTER_MAX_SIZE = 2049;
   // Impact Observatory land cover classes.
-  const LC_WATER = 1, LC_TREES = 2, LC_FLOODED = 4, LC_BARE = 8, LC_SNOW = 9;
+  const LC_NO_DATA = 0, LC_WATER = 1, LC_TREES = 2, LC_FLOODED = 4, LC_BARE = 8, LC_SNOW = 9, LC_CLOUDS = 10;
   // Transport Fever 3 writes biomes 0 to 4 as these gray levels.
   const BIOME_GRAY = [0, 63, 127, 191, 255];
   const GAME_METERS_PER_PIXEL = 4;
@@ -26,6 +26,14 @@ var heightmapExport = (function () {
   const HILL_SLOPE = 10, MOUNTAIN_BIOME_SLOPE = 25, MOUNTAIN_MASK_SLOPE = 20;
   // In-game meters.
   const RIVER_MAX_WIDTH = 280;
+  // The masks each climate's biome import reads that can be derived from terrain and land cover.
+  // Dry's coast_hills, mesas and monument_valley and Tropical's volcano are landforms these sources can't identify.
+  const CLIMATE_LAYERS = {
+    Temperate: ['mountains', 'rivers'],
+    Dry: ['mountains', 'rivers'],
+    Tropical: ['islands', 'mountains'],
+    Subarctic: ['lakes', 'mountains', 'swamps']
+  };
   const SEAM_FEATHER = 32;
   const SEAM_MEDIAN_RADIUS = 7;
   const SEAM_MIN_STEP = 0.1;
@@ -233,16 +241,67 @@ var heightmapExport = (function () {
     return table;
   }());
 
+  function crc32(bytes) {
+    let crc = 0xFFFFFFFF;
+    for (let i = 0; i < bytes.length; i++) crc = CRC_TABLE[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+  }
+
   function pngChunk(type, data) {
     const chunk = new Uint8Array(12 + data.length);
     const view = new DataView(chunk.buffer);
     view.setUint32(0, data.length);
     for (let i = 0; i < 4; i++) chunk[4 + i] = type.charCodeAt(i);
     chunk.set(data, 8);
-    let crc = 0xFFFFFFFF;
-    for (let i = 4; i < 8 + data.length; i++) crc = CRC_TABLE[(crc ^ chunk[i]) & 0xFF] ^ (crc >>> 8);
-    view.setUint32(8 + data.length, (crc ^ 0xFFFFFFFF) >>> 0);
+    view.setUint32(8 + data.length, crc32(chunk.subarray(4, 8 + data.length)));
     return chunk;
+  }
+
+  // Stored, uncompressed ZIP. The PNGs inside are already compressed, so deflating again would gain little.
+  async function makeZip(files) {
+    const now = new Date();
+    const time = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+    const date = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+    const parts = [], central = [];
+    let offset = 0;
+    for (const file of files) {
+      const name = new TextEncoder().encode(file.path);
+      const size = file.blob.size;
+      const crc = crc32(new Uint8Array(await file.blob.arrayBuffer()));
+
+      const local = new DataView(new ArrayBuffer(30));
+      local.setUint32(0, 0x04034b50, true);
+      local.setUint16(4, 20, true);
+      local.setUint16(10, time, true);
+      local.setUint16(12, date, true);
+      local.setUint32(14, crc, true);
+      local.setUint32(18, size, true);
+      local.setUint32(22, size, true);
+      local.setUint16(26, name.length, true);
+      parts.push(local, name, file.blob);
+
+      const entry = new DataView(new ArrayBuffer(46));
+      entry.setUint32(0, 0x02014b50, true);
+      entry.setUint16(4, 20, true);
+      entry.setUint16(6, 20, true);
+      entry.setUint16(12, time, true);
+      entry.setUint16(14, date, true);
+      entry.setUint32(16, crc, true);
+      entry.setUint32(20, size, true);
+      entry.setUint32(24, size, true);
+      entry.setUint16(28, name.length, true);
+      entry.setUint32(42, offset, true);
+      central.push(entry, name);
+      offset += 30 + name.length + size;
+    }
+    const centralSize = central.reduce((n, part) => n + part.byteLength, 0);
+    const end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true);
+    end.setUint16(8, files.length, true);
+    end.setUint16(10, files.length, true);
+    end.setUint32(12, centralSize, true);
+    end.setUint32(16, offset, true);
+    return new Blob(parts.concat(central, [end]), {type: 'application/zip'});
   }
 
   async function encodeGrayPng(samples, width, height, bitDepth, text) {
@@ -297,7 +356,8 @@ var heightmapExport = (function () {
   }
 
   // Hydro-flattened lakes and seas are stored as large, perfectly level areas.
-  function findWaterSurfaces(heights, width, height, cellArea) {
+  // floor, ceiling: the clamp levels, whose cells are flat only because they were clamped. cover: land cover classes, or null.
+  function findWaterSurfaces(heights, width, height, cellArea, floor, ceiling, cover) {
     const level = (i, j) => Math.abs(heights[i] - heights[j]) < FLAT_TOLERANCE;
     const flat = new Uint8Array(heights.length);
     for (let y = 0; y < height; y++) {
@@ -305,12 +365,13 @@ var heightmapExport = (function () {
         const i = y * width + x;
         const flatX = (x > 0 && level(i, i - 1)) || (x < width - 1 && level(i, i + 1));
         const flatY = (y > 0 && level(i, i - width)) || (y < height - 1 && level(i, i + width));
-        flat[i] = flatX && flatY ? 1 : 0;
+        flat[i] = flatX && flatY && heights[i] > floor && heights[i] < ceiling ? 1 : 0;
       }
     }
 
     const surfaces = [];
     const queue = new Int32Array(heights.length);
+    const claimed = new Uint8Array(heights.length);
     for (let start = 0; start < heights.length; start++) {
       if (!flat[start]) continue;
       flat[start] = 0;
@@ -328,8 +389,21 @@ var heightmapExport = (function () {
           }
         }
       }
-      if (tail >= MIN_WATER_CELLS) surfaces.push({level: sum / tail, top: top, cells: tail});
+      if (tail >= MIN_WATER_CELLS) {
+        surfaces.push({level: sum / tail, top: top, cells: tail});
+        for (let q = 0; q < tail; q++) claimed[queue[q]] = 1;
+      }
     }
+
+    // Land cover has no data over open ocean, so there it falls back to height. It keeps dry land below sea level from counting as water.
+    const isWater = i => cover && cover[i] !== LC_NO_DATA && cover[i] !== LC_CLOUDS ? cover[i] === LC_WATER : heights[i] <= 0;
+
+    // Open sea has real depth, so it never shows up as a flat surface. Other water at or below sea level counts as sea.
+    let seaCells = 0;
+    for (let i = 0; i < heights.length; i++) {
+      if (heights[i] <= 0 && !claimed[i] && isWater(i)) seaCells++;
+    }
+    if (seaCells >= MIN_WATER_CELLS) surfaces.push({level: 0, top: 0, cells: seaCells});
 
     surfaces.sort((a, b) => a.level - b.level);
     const merged = [];
@@ -342,9 +416,27 @@ var heightmapExport = (function () {
         merged.push({base: surface.level, top: surface.top, cells: surface.cells});
       }
     }
-    return merged
-      .map(m => ({level: m.base, top: m.top, areaKm2: m.cells * cellArea / 1e6}))
-      .sort((a, b) => b.areaKm2 - a.areaKm2);
+    // Dry land, sorted, so the share a water level would drown is a binary search.
+    const dry = [];
+    for (let i = 0; i < heights.length; i++) {
+      if (!claimed[i] && !isWater(i)) dry.push(heights[i]);
+    }
+    const drySorted = Float32Array.from(dry).sort();
+    function floodShare(level) {
+      let lo = 0, hi = drySorted.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (drySorted[mid] <= level) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo / heights.length;
+    }
+    return {
+      surfaces: merged
+        .map(m => ({level: m.base, top: m.top, areaKm2: m.cells * cellArea / 1e6}))
+        .sort((a, b) => b.areaKm2 - a.areaKm2),
+      floodShare: floodShare
+    };
   }
 
   // ArcGIS image services return raw pixels on exactly our grid when asked for band-sequential Web Mercator output.
@@ -396,14 +488,18 @@ var heightmapExport = (function () {
     return 'NOAA water depths applied';
   }
 
-  function clampAndMeasure(heights, floor) {
-    let lo = Infinity, hi = -Infinity;
+  function clampAndMeasure(heights, floor, ceiling) {
+    let lo = Infinity, hi = -Infinity, capped = 0;
     for (let i = 0; i < heights.length; i++) {
       if (heights[i] < floor) heights[i] = floor;
+      if (heights[i] > ceiling) {
+        heights[i] = ceiling;
+        capped++;
+      }
       lo = Math.min(lo, heights[i]);
       hi = Math.max(hi, heights[i]);
     }
-    return {lo: lo, hi: hi};
+    return {lo: lo, hi: hi, capped: capped};
   }
 
   // Two-pass chamfer distance, in cells, from every cell to the nearest one where source is set.
@@ -439,7 +535,7 @@ var heightmapExport = (function () {
     return d;
   }
 
-  // Biome, mountain and river masks for Transport Fever 3's biome import, from land cover plus terrain steepness.
+  // Biome map plus the climate's layer masks for Transport Fever 3's biome import, from land cover and terrain steepness.
   // waterLevel: meters, anything at or below it is water.
   async function renderBiomes(options) {
     const {bounds, width, height, climate, waterLevel} = options;
@@ -472,11 +568,19 @@ var heightmapExport = (function () {
       }
     }
 
-    // Rivers are the water that a morphological opening removes: anything narrower than RIVER_MAX_WIDTH.
-    const radius = RIVER_MAX_WIDTH / 2 / spacing;
-    const toLand = distanceTo(water.map(w => 1 - w), gw, gh);
-    const toCore = distanceTo(toLand.map(d => d > radius ? 1 : 0), gw, gh);
-    const rivers = water.map((w, i) => w && toCore[i] > radius ? 1 : 0);
+    const masks = {
+      mountains: () => mountains,
+      // The water a morphological opening removes: anything narrower than RIVER_MAX_WIDTH.
+      rivers: () => {
+        const radius = RIVER_MAX_WIDTH / 2 / spacing;
+        const toLand = distanceTo(water.map(w => 1 - w), gw, gh);
+        const toCore = distanceTo(toLand.map(d => d > radius ? 1 : 0), gw, gh);
+        return water.map((w, i) => w && toCore[i] > radius ? 1 : 0);
+      },
+      lakes: () => water.map((w, i) => w && heights[i] > 1 ? 1 : 0),
+      swamps: () => cover.map(c => c === LC_FLOODED ? 1 : 0),
+      islands: () => landNotTouchingEdge(water, gw, gh)
+    };
 
     const columns = new Int32Array(width), rows = new Int32Array(height);
     for (let i = 0; i < width; i++) columns[i] = Math.round(i * (gw - 1) / (width - 1));
@@ -491,49 +595,81 @@ var heightmapExport = (function () {
     }
     onStage('Writing biome maps...');
     const share = (grid, value) => grid.reduce((n, v) => n + (v === value ? 1 : 0), 0) / grid.length;
+    const layers = [];
+    for (const key of CLIMATE_LAYERS[climate] || CLIMATE_LAYERS.Temperate) {
+      const grid = masks[key]();
+      layers.push({key: key, blob: await encode(grid, [0, 255]), share: share(grid, 1)});
+    }
     return {
       biomes: await encode(biome, BIOME_GRAY),
-      mountains: await encode(mountains, [0, 255]),
-      rivers: await encode(rivers, [0, 255]),
-      shares: {biomes: [0, 1, 2, 3, 4].map(b => share(biome, b)), mountains: share(mountains, 1), rivers: share(rivers, 1)}
+      biomeShares: [0, 1, 2, 3, 4].map(b => share(biome, b)),
+      layers: layers
     };
   }
 
+  // Land masses that don't reach the edge of the map are islands.
+  function landNotTouchingEdge(water, width, height) {
+    const islands = new Uint8Array(water.length);
+    const seen = new Uint8Array(water.length);
+    const queue = new Int32Array(water.length);
+    for (let start = 0; start < water.length; start++) {
+      if (water[start] || seen[start]) continue;
+      seen[start] = 1;
+      let head = 0, tail = 0, edge = false;
+      queue[tail++] = start;
+      while (head < tail) {
+        const i = queue[head++];
+        const x = i % width, y = (i - x) / width;
+        if (x === 0 || y === 0 || x === width - 1 || y === height - 1) edge = true;
+        for (const j of [x > 0 ? i - 1 : -1, x < width - 1 ? i + 1 : -1, y > 0 ? i - width : -1, y < height - 1 ? i + width : -1]) {
+          if (j >= 0 && !water[j] && !seen[j]) {
+            seen[j] = 1;
+            queue[tail++] = j;
+          }
+        }
+      }
+      if (!edge) for (let q = 0; q < tail; q++) islands[queue[q]] = 1;
+    }
+    return islands;
+  }
+
   // Coarse pass for live feedback: extremes and water surfaces, without fetching full-resolution tiles.
-  // bathymetryLevel(water): given the flat water surfaces found, the meters below which NOAA depths apply, or null.
+  // bathymetryLevel(water, floodShare, areaKm2): given the water surfaces found, the meters below which NOAA depths apply, or null.
   async function analyze(options) {
-    const {bounds, aspect, floor, bathymetryLevel} = options;
+    const {bounds, aspect, floor, ceiling, bathymetryLevel} = options;
     const region = boundsToRegion(bounds);
     const width = Math.max(2, Math.round(PREVIEW_SIZE * Math.min(1, aspect)));
     const height = Math.max(2, Math.round(PREVIEW_SIZE * Math.min(1, 1 / aspect)));
     const heights = await sampleRegion(region, width, height, pickZoom(region.x1 - region.x0, width, 1), function () {});
-    let extremes = clampAndMeasure(heights, floor);
-    const cellSize = groundWidth(region) / (width - 1);
-    const water = findWaterSurfaces(heights, width, height, cellSize * cellSize);
-    const level = bathymetryLevel ? bathymetryLevel(water) : null;
-    let bathymetry = null;
-    if (level !== null) {
-      bathymetry = await applyBathymetry(heights, width, height, region, level);
-      extremes = clampAndMeasure(heights, floor);
-    }
-    let landCover = null;
+    let cover = null, landCover = null;
     try {
-      const cover = await fetchImageServer(LANDCOVER_URL, region, width, height, 'U8', 'RSP_NearestNeighbor');
+      cover = await fetchImageServer(LANDCOVER_URL, region, width, height, 'U8', 'RSP_NearestNeighbor');
       landCover = {};
       for (let i = 0; i < cover.length; i++) landCover[cover[i]] = (landCover[cover[i]] || 0) + 1 / cover.length;
     } catch (e) {
-      landCover = null;
+      cover = null;
+    }
+    let extremes = clampAndMeasure(heights, floor, ceiling);
+    const cellSize = groundWidth(region) / (width - 1);
+    const {surfaces: water, floodShare} = findWaterSurfaces(heights, width, height, cellSize * cellSize, floor, ceiling, cover);
+    const areaKm2 = width * height * cellSize * cellSize / 1e6;
+    const level = bathymetryLevel ? bathymetryLevel(water, floodShare, areaKm2) : null;
+    let bathymetry = null;
+    if (level !== null) {
+      bathymetry = await applyBathymetry(heights, width, height, region, level);
+      extremes = clampAndMeasure(heights, floor, ceiling);
     }
     return {
-      min: extremes.lo, max: extremes.hi, groundWidth: groundWidth(region), water: water, bathymetry: bathymetry,
+      min: extremes.lo, max: extremes.hi, groundWidth: groundWidth(region), areaKm2: areaKm2,
+      water: water, floodShare: floodShare, bathymetry: bathymetry,
       landCover: landCover, centerLat: yToLat((region.y0 + region.y1) / 2)
     };
   }
 
-  // floor: meters, anything lower is raised to it. range(lo, hi): given the data's extremes in meters, returns the {min, max} that map to black and white.
+  // floor, ceiling: meters, heights are clamped into that span. range(lo, hi): given the data's extremes in meters, returns the {min, max} that map to black and white.
   // bathymetryLevel: meters below which NOAA depths apply, or null.
   async function render(options) {
-    const {bounds, width, height, bitDepth, range, floor, bathymetryLevel} = options;
+    const {bounds, width, height, bitDepth, range, floor, ceiling, bathymetryLevel} = options;
     const onProgress = options.onProgress || function () {};
     const onStage = options.onStage || function () {};
     const region = boundsToRegion(bounds);
@@ -546,7 +682,7 @@ var heightmapExport = (function () {
       bathymetry = await applyBathymetry(heights, width, height, region, bathymetryLevel);
     }
 
-    const {lo, hi} = clampAndMeasure(heights, floor);
+    const {lo, hi, capped} = clampAndMeasure(heights, floor, ceiling);
     const levels = range(lo, hi);
     const black = levels.min, white = levels.max;
     const maxValue = 2 ** bitDepth - 1;
@@ -561,6 +697,8 @@ var heightmapExport = (function () {
       width: width, height: height, bitDepth: bitDepth, metersPerPixel: groundWidth(region) / (width - 1),
       blackMeters: black, whiteMeters: white,
       floorMeters: floor,
+      ceilingMeters: ceiling,
+      cappedFraction: capped / heights.length,
       bathymetry: bathymetry,
       dataMinMeters: lo, dataMaxMeters: hi,
       sourceZoom: zoom,
@@ -581,6 +719,7 @@ var heightmapExport = (function () {
     },
     analyze: analyze,
     render: render,
-    renderBiomes: renderBiomes
+    renderBiomes: renderBiomes,
+    zip: makeZip
   };
 }());

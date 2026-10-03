@@ -14,8 +14,13 @@ map = (function () {
   const exportDefaults = {lat: 39.109328, lng: -76.813227, metersPerPixel: 10};
   const RATIOS = ['1:1', '1:2', '1:3', '1:4', '1:5'];
   const CLIMATES = ['Temperate', 'Dry', 'Tropical', 'Subarctic'];
-  // Lowest Minimum Height the game's import dialog accepts.
+  // Lowest Minimum Height and highest Maximum Height the game's import dialog accepts.
   const GAME_MIN_HEIGHT = -100;
+  const GAME_MAX_HEIGHT = 3177;
+  // The game has one water level, so a lake's level drowns all lower land. Auto mode skips levels drowning more than this share of the map.
+  const MAX_FLOOD_SHARE = 0.15;
+  // ...and levels drowning more than this many times the water body's own area, like a tiny flat patch at the bottom of a dry valley.
+  const MAX_FLOOD_RATIO = 4;
   // Official in-game size in km, [short side, long side], for each ratio 1:1 to 1:5.
   const MAP_SIZES = {
     'Tiny': [[4, 4], [2.5, 5], [2, 6], [2, 8], [1.5, 7.5]],
@@ -202,6 +207,9 @@ map = (function () {
     townFolder.add(gui, 'exportTowns').name('export towns');
     townFolder.open();
 
+    gui.exportAll = function () { exportAll(); };
+    gui.add(gui, 'exportAll').name('export all');
+
     gui.help = function () {
       // show help screen and input blocker
       toggleHelp(true);
@@ -315,6 +323,10 @@ map = (function () {
     return Math.max(floor, GAME_MIN_HEIGHT / heightScale());
   }
 
+  function heightCeiling() {
+    return GAME_MAX_HEIGHT / heightScale();
+  }
+
   // In-game level that puts a flat water surface just under water.
   function waterLevelFor(surface, k) {
     return Math.ceil(k * surface.top + 0.5);
@@ -336,6 +348,7 @@ map = (function () {
         bounds: exportBounds(),
         aspect: (out.width - 1) / (out.height - 1),
         floor: floor,
+        ceiling: heightCeiling(),
         bathymetryLevel: previewBathymetryLevel
       });
     } catch (e) {
@@ -349,22 +362,28 @@ map = (function () {
   }
 
   // Real meters below which the preview takes NOAA depths: the water level the analysis is about to pick, or the typed one.
-  function previewBathymetryLevel(water) {
+  function previewBathymetryLevel(water, floodShare, areaKm2) {
     if (!gui.include_oceans) return null;
     var k = heightScale();
     if (!gui.autoexpose) return Number(gui.waterLevel) / k;
-    var choices = waterChoices(water, k);
-    return choices.length ? choices[0].level / k : null;
+    var choice = autoWaterChoice(waterChoices(water, k, floodShare), areaKm2);
+    return choice ? choice.level / k : null;
   }
 
-  // In-game water levels with their total surface area, largest first.
-  function waterChoices(water, k) {
+  function autoWaterChoice(choices, areaKm2) {
+    return choices.filter(function(c) {
+      return c.flood <= MAX_FLOOD_SHARE && c.flood * areaKm2 <= MAX_FLOOD_RATIO * c.areaKm2;
+    })[0] || null;
+  }
+
+  // In-game water levels with their total surface area and the share of the map's dry land each would drown, largest first.
+  function waterChoices(water, k, floodShare) {
     var choices = [];
     water.forEach(function(w) {
       var level = waterLevelFor(w, k);
       var same = choices.filter(function(c) { return c.level == level; })[0];
       if (same) same.areaKm2 += w.areaKm2;
-      else choices.push({level: level, areaKm2: w.areaKm2});
+      else choices.push({level: level, areaKm2: w.areaKm2, flood: floodShare(level / k)});
     });
     return choices.sort(function(a, b) { return b.areaKm2 - a.areaKm2; });
   }
@@ -376,7 +395,7 @@ map = (function () {
       setBoxWater(e.message);
       return;
     }
-    var shown = waterChoices(analysis.water, k).filter(function(c, i) { return i == 0 || c.areaKm2 >= 0.1; });
+    var shown = waterChoices(analysis.water, k, analysis.floodShare).filter(function(c, i) { return i == 0 || c.areaKm2 >= 0.1; });
     var depthNote = analysis.bathymetry && /unavailable/.test(analysis.bathymetry) ? ' (' + analysis.bathymetry + ')' : '';
     var climate = suggestClimate(analysis);
     var climateNote = climate ? '\nsuggested climate: ' + climate : '';
@@ -385,15 +404,16 @@ map = (function () {
       return;
     }
     setBoxWater('water levels: ' + shown.slice(0, 4).map(function(c) {
-      return c.level + ' (' + c.areaKm2.toFixed(1) + ' km2)';
+      var flood = c.flood > MAX_FLOOD_SHARE ? ', floods ' + Math.round(c.flood * 100) + '% of the map' : '';
+      return c.level + ' (' + c.areaKm2.toFixed(1) + ' km2' + flood + ')';
     }).join(', ') + depthNote + climateNote);
   }
 
-  // A rule of thumb from latitude and natural land cover. Water, built area and cloud (Impact Observatory 1, 7, 10) are left out.
+  // A rule of thumb from latitude and natural land cover. No data, water, built area and cloud (Impact Observatory 0, 1, 7, 10) are left out.
   function suggestClimate(a) {
     if (!a.landCover) return null;
     var c = a.landCover;
-    var natural = 1 - (c[1] || 0) - (c[7] || 0) - (c[10] || 0);
+    var natural = 1 - (c[0] || 0) - (c[1] || 0) - (c[7] || 0) - (c[10] || 0);
     if (natural < 0.05) return null;
     var trees = (c[2] || 0) / natural, crops = (c[5] || 0) / natural;
     var dryland = ((c[8] || 0) + (c[11] || 0)) / natural;
@@ -412,11 +432,11 @@ map = (function () {
       return;
     }
     var min = Math.max(GAME_MIN_HEIGHT, Math.floor(k * analysis.min));
-    var max = Math.max(min + 1, Math.ceil(k * analysis.max));
+    var max = Math.min(GAME_MAX_HEIGHT, Math.max(min + 1, Math.ceil(k * analysis.max)));
     gui.minHeight = String(min);
     gui.maxHeight = String(max);
-    var choices = waterChoices(analysis.water, k);
-    gui.waterLevel = String(choices.length ? choices[0].level : Math.max(GAME_MIN_HEIGHT, min - 1));
+    var choice = autoWaterChoice(waterChoices(analysis.water, k, analysis.floodShare), analysis.areaKm2);
+    gui.waterLevel = String(choice ? choice.level : Math.max(GAME_MIN_HEIGHT, min - 1));
     describeWater();
     refreshGUI();
     updateDisplayRange();
@@ -427,6 +447,7 @@ map = (function () {
     var min = Number(gui.minHeight), max = Number(gui.maxHeight), water = Number(gui.waterLevel);
     if (!isFinite(min) || !isFinite(max) || !(max > min)) throw new Error('maximum height must be above minimum height');
     if (min < GAME_MIN_HEIGHT) throw new Error('minimum height cannot be below ' + GAME_MIN_HEIGHT + ', the lowest the game accepts');
+    if (max > GAME_MAX_HEIGHT) throw new Error('maximum height cannot be above ' + GAME_MAX_HEIGHT + ', the highest the game accepts');
     if (!isFinite(water)) throw new Error('water level must be a number');
     return {k: k, min: min, max: max, water: water};
   }
@@ -469,128 +490,182 @@ map = (function () {
     }
   }
   
-  async function exportRegion() {
+  // One export at a time, with failures reported in the status panel.
+  async function runExport(label, task) {
     if (exporting) return;
     exporting = true;
     try {
-      var floor = heightFloor();
-      var h = readHeights();
-      var out = outputSize();
-      var mapName = gui.mapSize + ' ' + gui.ratio + ' ' + gui.orientation;
-      setStatus('Fetching elevation tiles...');
-      var result = await heightmapExport.render({
-        bounds: exportBounds(),
-        width: out.width,
-        height: out.height,
-        bitDepth: Number(gui.bitDepth),
-        floor: floor,
-        // Auto mode widens to whole in-game meters if full resolution finds a higher peak or lower point than the preview.
-        range: function(lo, hi) {
-          if (gui.autoexpose) {
-            h.min = Math.max(GAME_MIN_HEIGHT, Math.min(h.min, Math.floor(h.k * lo)));
-            h.max = Math.max(h.max, Math.ceil(h.k * hi));
-          }
-          return {min: h.min / h.k, max: h.max / h.k};
-        },
-        bathymetryLevel: gui.include_oceans ? h.water / h.k : null,
-        meta: {heightScale: h.k, waterLevel: h.water},
-        onProgress: function(fraction) {
-          setStatus('Fetching elevation tiles... ' + Math.round(fraction * 100) + '%');
-        },
-        onStage: setStatus
-      });
-      var m = result.meta;
-      if (String(h.min) != gui.minHeight || String(h.max) != gui.maxHeight) {
-        gui.minHeight = String(h.min);
-        gui.maxHeight = String(h.max);
-        refreshGUI();
-        updateDisplayRange();
-      }
-      saveAs(result.blob, (gui.fileName || 'heightmap') + '.png');
-      setStatus([
-        'Saved ' + mapName + ', ' + m.width + 'x' + m.height + ' ' + m.bitDepth + '-bit grayscale',
-        'Transport Fever import: Minimum Height ' + h.min + ', Maximum Height ' + h.max + ', Water Level ' + h.water,
-        'height scale ' + h.k + ', real elevations ' + m.blackMeters.toFixed(2) + ' to ' + m.whiteMeters.toFixed(2) + ' m',
-        'water depth: ' + (m.bathymetry || 'ocean data off, below sea level clamped to 0 m'),
-        'real ' + (m.metersPerPixel * (m.width - 1) / 1000).toFixed(2) + ' x ' + (m.metersPerPixel * (m.height - 1) / 1000).toFixed(2) + ' km at ' + m.metersPerPixel.toFixed(3) + ' m/px',
-        'center ' + m.centerLat.toFixed(6) + ', ' + m.centerLng.toFixed(6),
-        'bounds W ' + m.west.toFixed(6) + ' S ' + m.south.toFixed(6) + ' E ' + m.east.toFixed(6) + ' N ' + m.north.toFixed(6),
-        'source zoom ' + m.sourceZoom + (m.upsampled ? ' (output is finer than the source data, upsampled)' : '')
-      ].join('\n'));
-      console.log('heightmap export', m);
+      await task();
     } catch (e) {
-      setStatus('Export failed: ' + e.message);
-      console.error(e);
-    } finally {
-      exporting = false;
-    }
-  }
-  
-  async function exportTowns() {
-    if (exporting) return;
-    exporting = true;
-    try {
-      var out = outputSize();
-      setStatus('Looking up towns...');
-      var result = await townExport.build({
-        bounds: exportBounds(),
-        width: out.width,
-        height: out.height,
-        maxTowns: Math.round(gui.maxTowns),
-        minSpacing: Number(gui.townSpacing),
-        includeVillages: gui.includeVillages
-      });
-      saveAs(new Blob([result.lua], {type: 'text/plain'}), (gui.fileName || 'heightmap') + '_towns.lua');
-      townLayer.clearLayers().addTo(map);
-      result.towns.forEach(function(t) {
-        L.circleMarker([t.lat, t.lng], {radius: 4, color: '#ffcc00', weight: 2, fillOpacity: 0.8})
-          .bindTooltip(t.name + ', size ' + t.size)
-          .addTo(townLayer);
-      });
-      var names = result.towns.map(function(t) { return t.name; });
-      setStatus([
-        'Saved ' + result.towns.length + ' towns, chosen from ' + result.candidates + ' places inside the map',
-        names.slice(0, 10).join(', ') + (names.length > 10 ? ', ...' : '')
-      ].join('\n'));
-    } catch (e) {
-      setStatus('Town export failed: ' + e.message);
+      setStatus(label + ' failed: ' + e.message);
       console.error(e);
     } finally {
       exporting = false;
     }
   }
 
-  async function exportBiomeMaps() {
-    if (exporting) return;
-    exporting = true;
-    try {
-      var h = readHeights();
-      var out = outputSize();
-      var result = await heightmapExport.renderBiomes({
-        bounds: exportBounds(),
-        width: out.width,
-        height: out.height,
-        climate: gui.climate,
-        waterLevel: h.water / h.k,
-        onStage: setStatus
-      });
-      var name = gui.fileName || 'heightmap';
-      saveAs(result.biomes, name + '_biomes.png');
-      saveAs(result.mountains, name + '_mountains.png');
-      saveAs(result.rivers, name + '_rivers.png');
-      var s = result.shares;
-      setStatus([
-        'Saved ' + name + '_biomes.png, ' + name + '_mountains.png and ' + name + '_rivers.png, ' + out.width + 'x' + out.height + ', ' + gui.climate,
-        'biomes 0-4: ' + s.biomes.map(function(v) { return (v * 100).toFixed(1) + '%'; }).join(', '),
-        'mountains ' + (s.mountains * 100).toFixed(1) + '%, rivers ' + (s.rivers * 100).toFixed(1) + '%',
-        'Put them in the game\'s biomes folder and import them after the heightmap.'
-      ].join('\n'));
-    } catch (e) {
-      setStatus('Biome export failed: ' + e.message);
-      console.error(e);
-    } finally {
-      exporting = false;
+  function exportName() {
+    return gui.fileName || 'heightmap';
+  }
+
+  function mapName() {
+    return gui.mapSize + ' ' + gui.ratio + ' ' + gui.orientation;
+  }
+
+  async function buildHeightmap() {
+    var floor = heightFloor();
+    var h = readHeights();
+    var out = outputSize();
+    setStatus('Fetching elevation tiles...');
+    var result = await heightmapExport.render({
+      bounds: exportBounds(),
+      width: out.width,
+      height: out.height,
+      bitDepth: Number(gui.bitDepth),
+      floor: floor,
+      ceiling: heightCeiling(),
+      // Auto mode widens to whole in-game meters if full resolution finds a higher peak or lower point than the preview.
+      range: function(lo, hi) {
+        if (gui.autoexpose) {
+          h.min = Math.max(GAME_MIN_HEIGHT, Math.min(h.min, Math.floor(h.k * lo)));
+          h.max = Math.min(GAME_MAX_HEIGHT, Math.max(h.max, Math.ceil(h.k * hi)));
+        }
+        return {min: h.min / h.k, max: h.max / h.k};
+      },
+      bathymetryLevel: gui.include_oceans ? h.water / h.k : null,
+      meta: {heightScale: h.k, waterLevel: h.water},
+      onProgress: function(fraction) {
+        setStatus('Fetching elevation tiles... ' + Math.round(fraction * 100) + '%');
+      },
+      onStage: setStatus
+    });
+    if (String(h.min) != gui.minHeight || String(h.max) != gui.maxHeight) {
+      gui.minHeight = String(h.min);
+      gui.maxHeight = String(h.max);
+      refreshGUI();
+      updateDisplayRange();
     }
+    console.log('heightmap export', result.meta);
+    return {blob: result.blob, meta: result.meta, heights: h};
+  }
+
+  function heightmapSummary(r) {
+    var m = r.meta, h = r.heights;
+    return [
+      'Transport Fever import: Minimum Height ' + h.min + ', Maximum Height ' + h.max + ', Water Level ' + h.water,
+      'height scale ' + h.k + ', real elevations ' + m.blackMeters.toFixed(2) + ' to ' + m.whiteMeters.toFixed(2) + ' m',
+      'water depth: ' + (m.bathymetry || 'ocean data off, below sea level clamped to 0 m'),
+      m.cappedFraction > 0 ? (m.cappedFraction * 100).toFixed(2) + '% of the map was above the game\'s ' + GAME_MAX_HEIGHT + ' m limit and was flattened. Lower the height scale to keep those peaks.' : null,
+      'real ' + (m.metersPerPixel * (m.width - 1) / 1000).toFixed(2) + ' x ' + (m.metersPerPixel * (m.height - 1) / 1000).toFixed(2) + ' km at ' + m.metersPerPixel.toFixed(3) + ' m/px',
+      'center ' + m.centerLat.toFixed(6) + ', ' + m.centerLng.toFixed(6),
+      'bounds W ' + m.west.toFixed(6) + ' S ' + m.south.toFixed(6) + ' E ' + m.east.toFixed(6) + ' N ' + m.north.toFixed(6),
+      'source zoom ' + m.sourceZoom + (m.upsampled ? ' (output is finer than the source data, upsampled)' : '')
+    ].filter(function(line) { return line !== null; });
+  }
+
+  async function buildBiomes() {
+    var h = readHeights();
+    var out = outputSize();
+    return heightmapExport.renderBiomes({
+      bounds: exportBounds(),
+      width: out.width,
+      height: out.height,
+      climate: gui.climate,
+      waterLevel: h.water / h.k,
+      onStage: setStatus
+    });
+  }
+
+  function biomeSummary(result) {
+    return [
+      'biomes 0-4: ' + result.biomeShares.map(function(v) { return (v * 100).toFixed(1) + '%'; }).join(', '),
+      result.layers.map(function(l) { return l.key + ' ' + (l.share * 100).toFixed(1) + '%'; }).join(', ')
+    ];
+  }
+
+  function biomeFiles(result, name) {
+    return [{path: name + '_biomes.png', blob: result.biomes}].concat(result.layers.map(function(l) {
+      return {path: name + '_' + l.key + '.png', blob: l.blob};
+    }));
+  }
+
+  async function buildTowns() {
+    var out = outputSize();
+    setStatus('Looking up towns...');
+    var result = await townExport.build({
+      bounds: exportBounds(),
+      width: out.width,
+      height: out.height,
+      maxTowns: Math.round(gui.maxTowns),
+      minSpacing: Number(gui.townSpacing),
+      includeVillages: gui.includeVillages
+    });
+    townLayer.clearLayers().addTo(map);
+    result.towns.forEach(function(t) {
+      L.circleMarker([t.lat, t.lng], {radius: 4, color: '#ffcc00', weight: 2, fillOpacity: 0.8})
+        .bindTooltip(t.name + ', size ' + t.size)
+        .addTo(townLayer);
+    });
+    return result;
+  }
+
+  function townSummary(result) {
+    var names = result.towns.map(function(t) { return t.name; });
+    return [
+      result.towns.length + ' towns, chosen from ' + result.candidates + ' places inside the map',
+      names.slice(0, 10).join(', ') + (names.length > 10 ? ', ...' : '')
+    ];
+  }
+
+  function exportRegion() {
+    return runExport('Export', async function() {
+      var r = await buildHeightmap();
+      saveAs(r.blob, exportName() + '.png');
+      setStatus(['Saved ' + mapName() + ', ' + r.meta.width + 'x' + r.meta.height + ' ' + r.meta.bitDepth + '-bit grayscale']
+        .concat(heightmapSummary(r)).join('\n'));
+    });
+  }
+
+  function exportBiomeMaps() {
+    return runExport('Biome export', async function() {
+      var result = await buildBiomes();
+      var files = biomeFiles(result, exportName());
+      files.forEach(function(f) { saveAs(f.blob, f.path); });
+      var out = outputSize();
+      setStatus(['Saved ' + files.map(function(f) { return f.path; }).join(', ') + ', ' + out.width + 'x' + out.height + ', ' + gui.climate]
+        .concat(biomeSummary(result), ['Put them in the game\'s biomes folder and import them after the heightmap.']).join('\n'));
+    });
+  }
+
+  function exportTowns() {
+    return runExport('Town export', async function() {
+      var result = await buildTowns();
+      saveAs(new Blob([result.lua], {type: 'text/plain'}), exportName() + '_towns.lua');
+      var lines = townSummary(result);
+      lines[0] = 'Saved ' + lines[0];
+      setStatus(lines.join('\n'));
+    });
+  }
+
+  // Laid out like the game's user data folder, so extracting it there puts every file where its import dialog looks.
+  function exportAll() {
+    return runExport('Export all', async function() {
+      var name = exportName();
+      var heightmap = await buildHeightmap();
+      var biomes = await buildBiomes();
+      var towns = await buildTowns();
+      setStatus('Writing ' + name + '.zip...');
+      var zip = await heightmapExport.zip([
+        {path: 'heightmaps/' + name + '.png', blob: heightmap.blob}
+      ].concat(biomeFiles(biomes, name).map(function(f) {
+        return {path: 'biomes/' + f.path, blob: f.blob};
+      }), [
+        {path: 'towns_industries/' + name + '.lua', blob: new Blob([towns.lua], {type: 'text/plain'})}
+      ]));
+      saveAs(zip, name + '.zip');
+      setStatus(['Saved ' + name + '.zip for ' + mapName() + ', ' + gui.climate + '. Extract it into the Transport Fever 3 user folder, %APPDATA%\\Transport Fever 3.']
+        .concat(heightmapSummary(heightmap).slice(0, 4), biomeSummary(biomes), townSummary(towns)).join('\n'));
+    });
   }
 
   // show and hide help screen
