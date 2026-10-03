@@ -18,7 +18,7 @@ Other controls:
 - maximum height, minimum height, water level: the values to enter in the game. With auto-exposure on they are measured from the area inside the box, or you can type your own.
 - The box label lists the water levels of the flat water surfaces it finds (seas, lakes, reservoirs), largest first, with their area. Transport Fever has a single water level, so pick the one you want and enter it in the game.
 - height scale: in-game height per real meter. 1 keeps real heights. Heights scale around sea level, so the sea stays at the water level.
-- include ocean data / ocean floor (m): with ocean data on, set the lowest point of the ocean. With it off, everything below sea level is clamped to 0 m. The game's lowest minimum height is -100.
+- include ocean data / ocean floor (m): Water below the water level takes its depth from NOAA's DEM Global Mosaic, which has real depths where the elevation tiles store water as a flat surface, and the ocean floor sets the lowest point allowed. With it off, everything below sea level is clamped to 0 m. The game's lowest minimum height is -100.
 - bit depth: 16-bit grayscale PNG with no alpha channel by default. 8-bit is also available but its height steps are coarse.
 - reference map: overlays OpenStreetMap for finding places.
 - screenshot: saves the current view as an 8-bit image for testing.

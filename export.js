@@ -13,6 +13,9 @@ var heightmapExport = (function () {
   const FLAT_TOLERANCE = 0.02;
   const MIN_WATER_CELLS = 25;
   const WATER_MERGE_METERS = 0.5;
+  const BATHYMETRY_URL = 'https://gis.ngdc.noaa.gov/arcgis/rest/services/DEM_mosaics/DEM_global_mosaic/ImageServer/exportImage';
+  // Depth varies slowly, so it's fetched at most this many pixels across and interpolated up.
+  const BATHYMETRY_MAX_SIZE = 2049;
   const SEAM_FEATHER = 32;
   const SEAM_MEDIAN_RADIUS = 7;
   const SEAM_MIN_STEP = 0.1;
@@ -334,41 +337,97 @@ var heightmapExport = (function () {
       .sort((a, b) => b.areaKm2 - a.areaKm2);
   }
 
+  // NOAA's mosaic holds real water depth where the elevation tiles store water as a flat surface.
+  async function fetchBathymetry(region, width, height) {
+    const span = 2 * Math.PI * 6378137;
+    const dx = (region.x1 - region.x0) * span / (width - 1), dy = (region.y1 - region.y0) * span / (height - 1);
+    const west = (region.x0 - 0.5) * span - dx / 2, east = (region.x1 - 0.5) * span + dx / 2;
+    const south = (0.5 - region.y1) * span - dy / 2, north = (0.5 - region.y0) * span + dy / 2;
+    const params = new URLSearchParams({
+      bbox: [west, south, east, north].join(','), bboxSR: 3857, imageSR: 3857, size: width + ',' + height,
+      format: 'bsq', pixelType: 'F32', interpolation: 'RSP_BilinearInterpolation', f: 'image'
+    });
+    const response = await fetch(BATHYMETRY_URL + '?' + params, {signal: AbortSignal.timeout(120000)});
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength < width * height * 4) throw new Error('short response');
+    return new Float32Array(buffer, 0, width * height);
+  }
+
+  // Everything at or below level (meters) is under water in game, so it takes NOAA's depth, never rising above the level.
+  async function applyBathymetry(heights, width, height, region, level) {
+    if (!heights.some(h => h <= level)) return 'no water below the water level';
+    const scale = Math.min(1, (BATHYMETRY_MAX_SIZE - 1) / (Math.max(width, height) - 1));
+    const bw = Math.max(2, Math.round((width - 1) * scale) + 1), bh = Math.max(2, Math.round((height - 1) * scale) + 1);
+    let depth;
+    try {
+      depth = await fetchBathymetry(region, bw, bh);
+    } catch (e) {
+      return 'NOAA water depths unavailable (' + e.message + ')';
+    }
+    const fx = (bw - 1) / (width - 1), fy = (bh - 1) / (height - 1);
+    for (let j = 0; j < height; j++) {
+      const v = j * fy, r = Math.min(Math.floor(v), bh - 2), ty = v - r;
+      for (let i = 0; i < width; i++) {
+        const k = j * width + i;
+        if (heights[k] > level) continue;
+        const u = i * fx, c = Math.min(Math.floor(u), bw - 2), tx = u - c;
+        const top = depth[r * bw + c] + (depth[r * bw + c + 1] - depth[r * bw + c]) * tx;
+        const bottom = depth[(r + 1) * bw + c] + (depth[(r + 1) * bw + c + 1] - depth[(r + 1) * bw + c]) * tx;
+        const d = top + (bottom - top) * ty;
+        if (d > -12000 && d < 9000) heights[k] = Math.min(d, level);
+      }
+    }
+    return 'NOAA water depths applied';
+  }
+
+  function clampAndMeasure(heights, floor) {
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < heights.length; i++) {
+      if (heights[i] < floor) heights[i] = floor;
+      lo = Math.min(lo, heights[i]);
+      hi = Math.max(hi, heights[i]);
+    }
+    return {lo: lo, hi: hi};
+  }
+
   // Coarse pass for live feedback: extremes and water surfaces, without fetching full-resolution tiles.
+  // bathymetryLevel(water): given the flat water surfaces found, the meters below which NOAA depths apply, or null.
   async function analyze(options) {
-    const {bounds, aspect, floor} = options;
+    const {bounds, aspect, floor, bathymetryLevel} = options;
     const region = boundsToRegion(bounds);
     const width = Math.max(2, Math.round(PREVIEW_SIZE * Math.min(1, aspect)));
     const height = Math.max(2, Math.round(PREVIEW_SIZE * Math.min(1, 1 / aspect)));
     const heights = await sampleRegion(region, width, height, pickZoom(region.x1 - region.x0, width, 1), function () {});
-    let lo = Infinity, hi = -Infinity;
-    for (let i = 0; i < heights.length; i++) {
-      if (heights[i] < floor) heights[i] = floor;
-      lo = Math.min(lo, heights[i]);
-      hi = Math.max(hi, heights[i]);
-    }
+    let extremes = clampAndMeasure(heights, floor);
     const cellSize = groundWidth(region) / (width - 1);
-    return {
-      min: lo, max: hi, groundWidth: groundWidth(region),
-      water: findWaterSurfaces(heights, width, height, cellSize * cellSize)
-    };
+    const water = findWaterSurfaces(heights, width, height, cellSize * cellSize);
+    const level = bathymetryLevel ? bathymetryLevel(water) : null;
+    let bathymetry = null;
+    if (level !== null) {
+      bathymetry = await applyBathymetry(heights, width, height, region, level);
+      extremes = clampAndMeasure(heights, floor);
+    }
+    return {min: extremes.lo, max: extremes.hi, groundWidth: groundWidth(region), water: water, bathymetry: bathymetry};
   }
 
   // floor: meters, anything lower is raised to it. range(lo, hi): given the data's extremes in meters, returns the {min, max} that map to black and white.
+  // bathymetryLevel: meters below which NOAA depths apply, or null.
   async function render(options) {
-    const {bounds, width, height, bitDepth, range, floor} = options;
+    const {bounds, width, height, bitDepth, range, floor, bathymetryLevel} = options;
     const onProgress = options.onProgress || function () {};
+    const onStage = options.onStage || function () {};
     const region = boundsToRegion(bounds);
     const zoom = pickZoom(region.x1 - region.x0, width, 2);
 
     const heights = await sampleRegion(region, width, height, zoom, onProgress);
-
-    let lo = Infinity, hi = -Infinity;
-    for (let i = 0; i < heights.length; i++) {
-      if (heights[i] < floor) heights[i] = floor;
-      lo = Math.min(lo, heights[i]);
-      hi = Math.max(hi, heights[i]);
+    let bathymetry = null;
+    if (bathymetryLevel !== null && bathymetryLevel !== undefined) {
+      onStage('Fetching water depths...');
+      bathymetry = await applyBathymetry(heights, width, height, region, bathymetryLevel);
     }
+
+    const {lo, hi} = clampAndMeasure(heights, floor);
     const levels = range(lo, hi);
     const black = levels.min, white = levels.max;
     const maxValue = 2 ** bitDepth - 1;
@@ -383,6 +442,7 @@ var heightmapExport = (function () {
       width: width, height: height, bitDepth: bitDepth, metersPerPixel: groundWidth(region) / (width - 1),
       blackMeters: black, whiteMeters: white,
       floorMeters: floor,
+      bathymetry: bathymetry,
       dataMinMeters: lo, dataMaxMeters: hi,
       sourceZoom: zoom,
       upsampled: (region.x1 - region.x0) * TILE_SIZE * 2 ** zoom < width - 1

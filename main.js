@@ -138,7 +138,7 @@ map = (function () {
       if (value) runAnalysis();
     });
 
-    gui.include_oceans = false;
+    gui.include_oceans = true;
     gui.add(gui, 'include_oceans').name("include ocean data").onChange(runAnalysis);
 
     gui.export = function () {
@@ -324,7 +324,12 @@ map = (function () {
       var floor = heightFloor();
       var out = outputSize();
       setBoxWater('measuring...');
-      var result = await heightmapExport.analyze({bounds: exportBounds(), aspect: (out.width - 1) / (out.height - 1), floor: floor});
+      var result = await heightmapExport.analyze({
+        bounds: exportBounds(),
+        aspect: (out.width - 1) / (out.height - 1),
+        floor: floor,
+        bathymetryLevel: previewBathymetryLevel
+      });
     } catch (e) {
       if (generation == analysisGeneration) setBoxWater(e.message);
       return;
@@ -335,10 +340,19 @@ map = (function () {
     else describeWater();
   }
 
+  // Real meters below which the preview takes NOAA depths: the water level the analysis is about to pick, or the typed one.
+  function previewBathymetryLevel(water) {
+    if (!gui.include_oceans) return null;
+    var k = heightScale();
+    if (!gui.autoexpose) return Number(gui.waterLevel) / k;
+    var choices = waterChoices(water, k);
+    return choices.length ? choices[0].level / k : null;
+  }
+
   // In-game water levels with their total surface area, largest first.
-  function waterChoices(k) {
+  function waterChoices(water, k) {
     var choices = [];
-    analysis.water.forEach(function(w) {
+    water.forEach(function(w) {
       var level = waterLevelFor(w, k);
       var same = choices.filter(function(c) { return c.level == level; })[0];
       if (same) same.areaKm2 += w.areaKm2;
@@ -354,14 +368,15 @@ map = (function () {
       setBoxWater(e.message);
       return;
     }
-    var shown = waterChoices(k).filter(function(c, i) { return i == 0 || c.areaKm2 >= 0.1; });
+    var shown = waterChoices(analysis.water, k).filter(function(c, i) { return i == 0 || c.areaKm2 >= 0.1; });
+    var depthNote = analysis.bathymetry && /unavailable/.test(analysis.bathymetry) ? ' (' + analysis.bathymetry + ')' : '';
     if (!shown.length) {
-      setBoxWater('no flat water surfaces found');
+      setBoxWater('no flat water surfaces found' + depthNote);
       return;
     }
     setBoxWater('water levels: ' + shown.slice(0, 4).map(function(c) {
       return c.level + ' (' + c.areaKm2.toFixed(1) + ' km2)';
-    }).join(', '));
+    }).join(', ') + depthNote);
   }
 
   function applyAnalysis() {
@@ -375,7 +390,7 @@ map = (function () {
     var max = Math.max(min + 1, Math.ceil(k * analysis.max));
     gui.minHeight = String(min);
     gui.maxHeight = String(max);
-    var choices = waterChoices(k);
+    var choices = waterChoices(analysis.water, k);
     gui.waterLevel = String(choices.length ? choices[0].level : Math.max(GAME_MIN_HEIGHT, min - 1));
     describeWater();
     refreshGUI();
@@ -452,10 +467,12 @@ map = (function () {
           }
           return {min: h.min / h.k, max: h.max / h.k};
         },
+        bathymetryLevel: gui.include_oceans ? h.water / h.k : null,
         meta: {heightScale: h.k, waterLevel: h.water},
         onProgress: function(fraction) {
           setStatus('Fetching elevation tiles... ' + Math.round(fraction * 100) + '%');
-        }
+        },
+        onStage: setStatus
       });
       var m = result.meta;
       if (String(h.min) != gui.minHeight || String(h.max) != gui.maxHeight) {
@@ -469,6 +486,7 @@ map = (function () {
         'Saved ' + mapName + ', ' + m.width + 'x' + m.height + ' ' + m.bitDepth + '-bit grayscale',
         'Transport Fever import: Minimum Height ' + h.min + ', Maximum Height ' + h.max + ', Water Level ' + h.water,
         'height scale ' + h.k + ', real elevations ' + m.blackMeters.toFixed(2) + ' to ' + m.whiteMeters.toFixed(2) + ' m',
+        'water depth: ' + (m.bathymetry || 'ocean data off, below sea level clamped to 0 m'),
         'real ' + (m.metersPerPixel * (m.width - 1) / 1000).toFixed(2) + ' x ' + (m.metersPerPixel * (m.height - 1) / 1000).toFixed(2) + ' km at ' + m.metersPerPixel.toFixed(3) + ' m/px',
         'center ' + m.centerLat.toFixed(6) + ', ' + m.centerLng.toFixed(6),
         'bounds W ' + m.west.toFixed(6) + ' S ' + m.south.toFixed(6) + ' E ' + m.east.toFixed(6) + ' N ' + m.north.toFixed(6),
