@@ -30,17 +30,28 @@ var heightmapExport = (function () {
   const COAST_HILLS_DISTANCE = 15000, HILL_AREA_RADIUS = 500, HILL_AREA_SHARE = 0.3;
   // Real meters. The game's volcano covers the whole cone, so each OpenStreetMap volcano spreads down the hill slopes around it.
   const SUMMIT_SEARCH_RADIUS = 1000, VOLCANO_SEED_RADIUS = 600, VOLCANO_RADIUS = 10000;
-  // The masks each climate's biome import reads that can be derived from terrain, land cover and OpenStreetMap.
-  // Dry's mesas and monument_valley are landforms these sources can't identify.
+  // Mesas and buttes are land ringed by cliffs steeper than CLIFF_SLOPE degrees, with a summit TABLELAND_MIN_RELIEF real meters above the highest point of its foot.
+  const CLIFF_SLOPE = 45, TABLELAND_MIN_RELIEF = 30;
+  // Real meters. Closes gaps in a cliff ring up to twice this wide.
+  const CLIFF_GAP = 30;
+  // Real meters. A formation takes in the slopes this close to it.
+  const TABLELAND_APRON = 100;
+  // Square kilometers. Formations under MESA_MIN_KM2 are buttes. Formations over TABLELAND_MAX_KM2 are plateaus.
+  const TABLELAND_MIN_KM2 = 0.005, MESA_MIN_KM2 = 0.5, TABLELAND_MAX_KM2 = 25;
+  // Buttes make a monument valley only in groups of MONUMENT_MIN_BUTTES, each within MONUMENT_RADIUS real meters of the next.
+  const MONUMENT_RADIUS = 2000, MONUMENT_MIN_BUTTES = 3;
+  // The masks each climate's biome import reads.
   const CLIMATE_LAYERS = {
     Temperate: ['mountains', 'rivers'],
-    Dry: ['coast_hills', 'mountains', 'rivers'],
+    Dry: ['coast_hills', 'mesas', 'monument_valley', 'mountains', 'rivers'],
     Tropical: ['islands', 'mountains', 'volcano'],
     Subarctic: ['lakes', 'mountains', 'swamps']
   };
   const SEAM_FEATHER = 32;
   const SEAM_MEDIAN_RADIUS = 7;
   const SEAM_MIN_STEP = 0.1;
+  // Survey mismatches are a few meters. Larger steps come from bad tile pixels, which healing would smear across the next 32 rows.
+  const SEAM_MAX_STEP = 30;
 
   function lngToX(lng) {
     return (lng + 180) / 360;
@@ -111,7 +122,7 @@ var heightmapExport = (function () {
       const near = Array.from(step.subarray(Math.max(0, p - SEAM_MEDIAN_RADIUS), Math.min(length, p + SEAM_MEDIAN_RADIUS + 1)));
       near.sort((x, y) => x - y);
       const offset = near[near.length >> 1];
-      if (Math.abs(offset) < SEAM_MIN_STEP) continue;
+      if (Math.abs(offset) < SEAM_MIN_STEP || Math.abs(offset) > SEAM_MAX_STEP) continue;
       for (let k = 0; k < SEAM_FEATHER; k++) {
         const share = offset / 2 * (1 - k / SEAM_FEATHER);
         a[indexA(p, k)] += share;
@@ -547,8 +558,9 @@ var heightmapExport = (function () {
 
   // Biome map plus the climate's layer masks for Transport Fever 3's biome import, from land cover and terrain steepness.
   // waterLevel: meters, anything at or below it is water. volcanoes: OpenStreetMap volcano nodes, {lat, lon}.
+  // width and height are the region's, north up. northLeft turns every image a quarter left.
   async function renderBiomes(options) {
-    const {bounds, width, height, climate, waterLevel, volcanoes} = options;
+    const {bounds, width, height, climate, waterLevel, volcanoes, northLeft} = options;
     const onStage = options.onStage || function () {};
     const region = boundsToRegion(bounds);
     const {width: gw, height: gh} = rasterSize(width, height);
@@ -599,8 +611,14 @@ var heightmapExport = (function () {
         const toSea = distanceTo(water.map((w, i) => w && heights[i] <= 1 ? 1 : 0), gw, gh);
         return land.map((l, i) => l && toSea[i] * realSpacing <= COAST_HILLS_DISTANCE && steep[i] >= HILL_AREA_SHARE * landShare[i] ? 1 : 0);
       },
-      volcano: () => growVolcanoes(volcanoes || [], region, heights, slope, water, gw, gh, realSpacing)
+      volcano: () => growVolcanoes(volcanoes || [], region, heights, slope, water, gw, gh, realSpacing),
+      mesas: () => tablelands().mesas,
+      monument_valley: () => tablelands().monumentValley
     };
+    let found = null;
+    function tablelands() {
+      return found || (found = findTablelands(heights, slope, water, gw, gh, realSpacing));
+    }
 
     const columns = new Int32Array(width), rows = new Int32Array(height);
     for (let i = 0; i < width; i++) columns[i] = Math.round(i * (gw - 1) / (width - 1));
@@ -611,7 +629,7 @@ var heightmapExport = (function () {
         const row = rows[j] * gw;
         for (let i = 0; i < width; i++) samples[j * width + i] = gray[grid[row + columns[i]]];
       }
-      return encodeGrayPng(samples, width, height, 8, {});
+      return encodeTurned(samples, width, height, 8, {}, northLeft);
     }
     onStage('Writing biome maps...');
     const share = (grid, value) => grid.reduce((n, v) => n + (v === value ? 1 : 0), 0) / grid.length;
@@ -697,30 +715,105 @@ var heightmapExport = (function () {
     return mask;
   }
 
-  // Land masses that don't reach the edge of the map are islands.
-  function landNotTouchingEdge(water, width, height) {
-    const islands = new Uint8Array(water.length);
-    const seen = new Uint8Array(water.length);
-    const queue = new Int32Array(water.length);
-    for (let start = 0; start < water.length; start++) {
-      if (water[start] || seen[start]) continue;
-      seen[start] = 1;
-      let head = 0, tail = 0, edge = false;
+  // Mesas and monument valley buttes: cliff-ringed land standing above its surroundings.
+  function findTablelands(heights, slope, water, width, height, spacing) {
+    const n = heights.length;
+    const gap = Math.round(CLIFF_GAP / spacing);
+    const cliff = slope.map((s, i) => s >= CLIFF_SLOPE && !water[i] ? 1 : 0);
+    const toCliff = distanceTo(cliff, width, height);
+    const toOpen = distanceTo(toCliff.map(d => d > gap ? 1 : 0), width, height);
+    const closed = cliff.map((c, i) => c || toOpen[i] > gap ? 1 : 0);
+
+    // Land that reaches the map edge or water without crossing a cliff is outside every formation.
+    const open = label(closed.map(c => 1 - c), width, height);
+    const reachesOut = new Uint8Array(open.count + 1);
+    for (let i = 0; i < n; i++) {
+      const x = i % width, y = (i - x) / width;
+      if (water[i] || x === 0 || y === 0 || x === width - 1 || y === height - 1) reachesOut[open.labels[i]] = 1;
+    }
+    const outside = open.labels.map((l, i) => water[i] || (l && reachesOut[l]) ? 1 : 0);
+
+    // The highest foot cell rules out a loose stretch of canyon wall, whose foot runs along the plateau rim as high as its top.
+    const formations = label(outside.map(o => 1 - o), width, height);
+    const count = formations.count, labels = formations.labels;
+    const cells = new Int32Array(count + 1), first = new Int32Array(count + 1).fill(-1);
+    const summit = new Float32Array(count + 1).fill(-Infinity), foot = new Float32Array(count + 1).fill(-Infinity);
+    const edge = new Uint8Array(count + 1);
+    for (let i = 0; i < n; i++) {
+      const l = labels[i];
+      if (!l) continue;
+      if (first[l] < 0) first[l] = i;
+      cells[l]++;
+      summit[l] = Math.max(summit[l], heights[i]);
+      const x = i % width, y = (i - x) / width;
+      if (x === 0 || y === 0 || x === width - 1 || y === height - 1) edge[l] = 1;
+      else if (outside[i - 1] || outside[i + 1] || outside[i - width] || outside[i + width]) foot[l] = Math.max(foot[l], heights[i]);
+    }
+    const MESA = 1, BUTTE = 2;
+    const kind = new Uint8Array(count + 1);
+    for (let l = 1; l <= count; l++) {
+      const km2 = cells[l] * spacing * spacing / 1e6;
+      if (edge[l] || km2 < TABLELAND_MIN_KM2 || km2 > TABLELAND_MAX_KM2 || summit[l] - foot[l] < TABLELAND_MIN_RELIEF) continue;
+      kind[l] = km2 >= MESA_MIN_KM2 ? MESA : BUTTE;
+    }
+    function footprint(k) {
+      const core = labels.map(l => kind[l] === k ? 1 : 0);
+      const toCore = distanceTo(core, width, height);
+      return core.map((c, i) => !water[i] && (c || (toCore[i] * spacing <= TABLELAND_APRON && slope[i] > HILL_SLOPE)) ? 1 : 0);
+    }
+    const buttes = footprint(BUTTE);
+    const groups = label(distanceTo(buttes, width, height).map(d => d * spacing <= MONUMENT_RADIUS / 2 ? 1 : 0), width, height);
+    const groupSize = new Int32Array(groups.count + 1);
+    for (let l = 1; l <= count; l++) if (kind[l] === BUTTE) groupSize[groups.labels[first[l]]]++;
+    return {
+      mesas: footprint(MESA),
+      monumentValley: buttes.map((b, i) => b && groupSize[groups.labels[i]] >= MONUMENT_MIN_BUTTES ? 1 : 0)
+    };
+  }
+
+  // Connected regions of nonzero cells, numbered from 1.
+  function label(mask, width, height) {
+    const labels = new Int32Array(mask.length), queue = new Int32Array(mask.length);
+    let count = 0;
+    for (let start = 0; start < mask.length; start++) {
+      if (!mask[start] || labels[start]) continue;
+      labels[start] = ++count;
+      let head = 0, tail = 0;
       queue[tail++] = start;
       while (head < tail) {
         const i = queue[head++];
         const x = i % width, y = (i - x) / width;
-        if (x === 0 || y === 0 || x === width - 1 || y === height - 1) edge = true;
         for (const j of [x > 0 ? i - 1 : -1, x < width - 1 ? i + 1 : -1, y > 0 ? i - width : -1, y < height - 1 ? i + width : -1]) {
-          if (j >= 0 && !water[j] && !seen[j]) {
-            seen[j] = 1;
+          if (j >= 0 && mask[j] && !labels[j]) {
+            labels[j] = count;
             queue[tail++] = j;
           }
         }
       }
-      if (!edge) for (let q = 0; q < tail; q++) islands[queue[q]] = 1;
     }
-    return islands;
+    return {labels: labels, count: count};
+  }
+
+  // A quarter turn counterclockwise, which puts north on the left.
+  function rotateLeft(samples, width, height) {
+    const out = new samples.constructor(samples.length);
+    for (let r = 0; r < height; r++) {
+      for (let c = 0; c < width; c++) out[(width - 1 - c) * height + r] = samples[r * width + c];
+    }
+    return out;
+  }
+
+  function encodeTurned(samples, width, height, bitDepth, text, northLeft) {
+    return northLeft ? encodeGrayPng(rotateLeft(samples, width, height), height, width, bitDepth, text) : encodeGrayPng(samples, width, height, bitDepth, text);
+  }
+
+  // Land masses that don't reach the edge of the map are islands.
+  function landNotTouchingEdge(water, width, height) {
+    const {labels, count} = label(water.map(w => 1 - w), width, height);
+    const edge = new Uint8Array(count + 1);
+    for (let x = 0; x < width; x++) edge[labels[x]] = edge[labels[(height - 1) * width + x]] = 1;
+    for (let y = 0; y < height; y++) edge[labels[y * width]] = edge[labels[y * width + width - 1]] = 1;
+    return labels.map(l => l && !edge[l] ? 1 : 0);
   }
 
   // Coarse pass for live feedback: extremes and water surfaces, without fetching full-resolution tiles.
@@ -760,8 +853,9 @@ var heightmapExport = (function () {
 
   // limits(peak): as for analyze. range(lo, hi): given the clamped data's extremes in meters, returns the {min, max} that map to black and white.
   // bathymetryLevel: meters below which NOAA depths apply, or null.
+  // width and height are the region's, north up. northLeft turns the image a quarter left.
   async function render(options) {
-    const {bounds, width, height, bitDepth, range, limits, bathymetryLevel} = options;
+    const {bounds, width, height, bitDepth, range, limits, bathymetryLevel, northLeft} = options;
     const onProgress = options.onProgress || function () {};
     const onStage = options.onStage || function () {};
     const region = boundsToRegion(bounds);
@@ -787,7 +881,8 @@ var heightmapExport = (function () {
 
     const meta = Object.assign({
       centerLat: yToLat((region.y0 + region.y1) / 2), centerLng: xToLng((region.x0 + region.x1) / 2),
-      width: width, height: height, bitDepth: bitDepth, metersPerPixel: groundWidth(region) / (width - 1),
+      width: northLeft ? height : width, height: northLeft ? width : height, northEdge: northLeft ? 'left' : 'top',
+      bitDepth: bitDepth, metersPerPixel: groundWidth(region) / (width - 1),
       blackMeters: black, whiteMeters: white,
       floorMeters: floor,
       ceilingMeters: ceiling,
@@ -798,7 +893,7 @@ var heightmapExport = (function () {
       upsampled: (region.x1 - region.x0) * TILE_SIZE * 2 ** zoom < width - 1
     }, bounds, options.meta);
 
-    const blob = await encodeGrayPng(samples, width, height, bitDepth, {Description: JSON.stringify(meta)});
+    const blob = await encodeTurned(samples, width, height, bitDepth, {Description: JSON.stringify(meta)}, northLeft);
     return {blob: blob, meta: meta};
   }
 

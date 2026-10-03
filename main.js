@@ -9,8 +9,8 @@ map = (function () {
   var exporting = false;
   var analysis = null;
   var analysisGeneration = 0;
-  // The height scale the user typed. Auto mode may show a lower one so high peaks fit under the game's limit.
-  var requestedScale = '1';
+  // What the user typed into whichever of height scale and steepness "scale by" picks. Auto mode may show less so high peaks fit under the game's limit.
+  var requestedText = '1';
   var exportFolder;
   var inputError = false;
   const exportDefaults = {lat: 39.109328, lng: -76.813227, metersPerPixel: 10};
@@ -19,6 +19,7 @@ map = (function () {
   // Lowest Minimum Height and highest Maximum Height the game's import dialog accepts.
   const GAME_MIN_HEIGHT = -100;
   const GAME_MAX_HEIGHT = 3177;
+  const GAME_METERS_PER_PIXEL = 4;
   // The game has one water level, so a lake's level drowns all lower land. Auto mode skips levels drowning more than this share of the map.
   const MAX_FLOOD_SHARE = 0.15;
   // ...and levels drowning more than this many times the water body's own area, like a tiny flat patch at the bottom of a dry valley.
@@ -137,9 +138,6 @@ map = (function () {
     gui.add(gui, 'minHeight').name('minimum height').onFinishChange(applyManualHeights);
     gui.add(gui, 'waterLevel').name('water level').onFinishChange(applyManualHeights);
 
-    gui.scaleFactor = 1 +'';
-    gui.add(gui, 'scaleFactor').name("z:x scale factor");
-
     gui.autoexpose = true;
     gui.add(gui, 'autoexpose').name("auto-exposure").onChange(function(value) {
       heightFieldsEditable(!value);
@@ -171,7 +169,9 @@ map = (function () {
     // Text fields because this dat.gui version rounds number boxes to the precision of their initial value.
     gui.center = '';
     gui.metersPerPixel = String(exportDefaults.metersPerPixel);
-    gui.heightScale = requestedScale;
+    gui.scaleMode = 'height scale';
+    gui.heightScale = requestedText;
+    gui.steepness = '';
     gui.oceanFloor = String(GAME_MIN_HEIGHT);
     gui.bitDepth = 16;
     gui.fileName = 'heightmap';
@@ -181,11 +181,12 @@ map = (function () {
     exportFolder.add(gui, 'orientation', ['portrait', 'landscape']).name('orientation').onChange(regionChanged);
     exportFolder.add(gui, 'center').name('center (lat, lon)').onFinishChange(applyCenter);
     exportFolder.add(gui, 'metersPerPixel').name('real meters per pixel').onFinishChange(applyScale);
-    exportFolder.add(gui, 'heightScale').name('height scale').onFinishChange(function() {
-      requestedScale = gui.heightScale;
-      if (gui.autoexpose) runAnalysis();
-      else applyManualHeights();
+    exportFolder.add(gui, 'scaleMode', ['height scale', 'steepness']).name('scale by').onChange(function(mode) {
+      requestedText = mode == 'steepness' ? gui.steepness : gui.heightScale;
+      scaleFieldsEditable();
     });
+    exportFolder.add(gui, 'heightScale').name('height scale').onFinishChange(scaleChanged);
+    exportFolder.add(gui, 'steepness').name('steepness (x real)').onFinishChange(scaleChanged);
     exportFolder.add(gui, 'oceanFloor').name('ocean floor (m)').onFinishChange(runAnalysis);
     exportFolder.add(gui, 'bitDepth', [16, 8]).name('bit depth');
     exportFolder.add(gui, 'fileName').name('file name');
@@ -218,14 +219,26 @@ map = (function () {
       toggleHelp(true);
     }
     gui.add(gui, 'help');
-    // set scale factor text field to be uneditable but still selectable (for copying)
-    controller('scaleFactor').domElement.firstChild.setAttribute("readonly", true);
+    scaleFieldsEditable();
     
   }
+  // The export region's size in pixels, north up.
   function outputSize() {
     var km = MAP_SIZES[gui.mapSize][RATIOS.indexOf(gui.ratio)];
     var shortSide = km[0] * 256 + 1, longSide = km[1] * 256 + 1;
     return gui.orientation == 'landscape' ? {width: longSide, height: shortSide} : {width: shortSide, height: longSide};
+  }
+
+  // The game always runs a map's long side top to bottom, so landscape exports are turned with north on the left.
+  function northLeft() {
+    var out = outputSize();
+    return out.width > out.height;
+  }
+
+  // The exported files' size in pixels.
+  function imageSize() {
+    var out = outputSize();
+    return northLeft() ? {width: out.height, height: out.width} : out;
   }
 
   // Largest rectangle of the output's aspect ratio that fits the map with a margin, in container pixels.
@@ -258,12 +271,16 @@ map = (function () {
     box.style.top = r.top + 'px';
     box.style.width = r.width + 'px';
     box.style.height = r.height + 'px';
-    document.getElementById('export-box-size').textContent = out.width + ' x ' + out.height + ' px, real ' +
+    var image = imageSize();
+    document.getElementById('export-box-size').textContent = image.width + ' x ' + image.height + ' px' +
+      (northLeft() ? ' with north on the left' : '') + ', real ' +
       (mpp * (out.width - 1) / 1000).toFixed(2) + ' x ' + (mpp * (out.height - 1) / 1000).toFixed(2) + ' km';
 
     var center = map.getCenter();
     gui.center = center.lat.toFixed(6) + ', ' + center.lng.toFixed(6);
     gui.metersPerPixel = mpp.toFixed(3);
+    // Steepness mode waits for the analysis, which also fits the scale under the game's limit.
+    if (gui.scaleMode == 'height scale' && Number(gui.heightScale) > 0) gui.steepness = steepnessText(Number(gui.heightScale));
     exportFolder.__controllers.forEach(function(c) { c.updateDisplay(); });
   }
 
@@ -297,19 +314,28 @@ map = (function () {
   }
 
   function controller(property) {
-    return gui.__controllers.filter(function(c) { return c.property == property; })[0];
+    return gui.__controllers.concat(exportFolder.__controllers).filter(function(c) { return c.property == property; })[0];
   }
 
   function refreshGUI() {
     gui.__controllers.concat(exportFolder.__controllers).forEach(function(c) { c.updateDisplay(); });
   }
 
-  function heightFieldsEditable(editable) {
-    ['maxHeight', 'minHeight', 'waterLevel'].forEach(function(property) {
+  function fieldsEditable(properties, editable) {
+    properties.forEach(function(property) {
       var input = controller(property).domElement.firstChild;
       if (editable) input.removeAttribute('readonly');
       else input.setAttribute('readonly', true);
     });
+  }
+
+  function heightFieldsEditable(editable) {
+    fieldsEditable(['maxHeight', 'minHeight', 'waterLevel'], editable);
+  }
+
+  function scaleFieldsEditable() {
+    fieldsEditable(['heightScale'], gui.scaleMode == 'height scale');
+    fieldsEditable(['steepness'], gui.scaleMode == 'steepness');
   }
 
   function heightScale() {
@@ -318,20 +344,59 @@ map = (function () {
     return k;
   }
 
-  // Real-meter clamp, tightened so the in-game minimum stays within the game's limit at any height scale.
+  // How many times steeper than real the terrain comes out, given the game's 4 m pixels.
+  function steepnessText(k) {
+    return String(Number((k * metersPerPixel() / GAME_METERS_PER_PIXEL).toPrecision(3)));
+  }
+
+  // The height scale the user asked for, from whichever field "scale by" picks.
+  function requestedScale() {
+    var value = Number(requestedText);
+    if (!(value > 0)) throw new Error(gui.scaleMode + ' must be a positive number');
+    return gui.scaleMode == 'steepness' ? value * GAME_METERS_PER_PIXEL / metersPerPixel() : value;
+  }
+
+  // Four significant digits, rounded down so a fitted peak stays under the game's limit.
+  function scaleDigits(k) {
+    var unit = Math.pow(10, Math.floor(Math.log10(k)) - 3);
+    return Number((Math.floor(k / unit + 1e-9) * unit).toPrecision(4));
+  }
+
+  function showScale(k) {
+    gui.heightScale = String(k);
+    gui.steepness = steepnessText(k);
+    controller('heightScale').updateDisplay();
+    controller('steepness').updateDisplay();
+  }
+
+  function scaleChanged(value) {
+    requestedText = value;
+    if (gui.autoexpose) {
+      runAnalysis();
+      return;
+    }
+    try {
+      showScale(scaleDigits(requestedScale()));
+    } catch (e) {
+      showInputError(e.message);
+      return;
+    }
+    applyManualHeights();
+  }
+
+  // Real-meter clamp from the in-game ocean floor, so water keeps its in-game depth at any height scale.
   function heightFloor() {
     if (!gui.include_oceans) return 0;
     var floor = Number(gui.oceanFloor);
     if (!(floor <= 0 && floor >= GAME_MIN_HEIGHT)) throw new Error('ocean floor must be between ' + GAME_MIN_HEIGHT + ' and 0 meters');
-    return Math.max(floor, GAME_MIN_HEIGHT / heightScale());
+    return floor / heightScale();
   }
 
-  // Real-meter clamps for sampled heights. Auto mode first lowers the height scale just enough for the peak to fit under the game's limit.
+  // Real-meter clamps for sampled heights. Auto mode first lowers the requested scale just enough for the peak to fit under the game's limit.
   function heightLimits(peak) {
-    if (gui.autoexpose) {
-      var k = Number(requestedScale);
-      gui.heightScale = String(k * peak > GAME_MAX_HEIGHT ? Math.floor(GAME_MAX_HEIGHT / peak * 1e4) / 1e4 : k);
-    }
+    var k = requestedScale();
+    if (gui.autoexpose && k * peak > GAME_MAX_HEIGHT) k = GAME_MAX_HEIGHT / peak;
+    showScale(scaleDigits(k));
     return {floor: heightFloor(), ceiling: GAME_MAX_HEIGHT / heightScale()};
   }
 
@@ -408,8 +473,10 @@ map = (function () {
     var shown = waterChoices(analysis.water, k, analysis.floodShare).filter(function(c, i) { return i == 0 || c.areaKm2 >= 0.1; });
     var depthNote = analysis.bathymetry && /unavailable/.test(analysis.bathymetry) ? ' (' + analysis.bathymetry + ')' : '';
     var climate = suggestClimate(analysis);
-    var notes = (climate ? '\nsuggested climate: ' + climate : '') + (gui.autoexpose && k < Number(requestedScale) ?
-      '\nheight scale lowered from ' + requestedScale + ' to ' + k + ' so the highest point fits under ' + GAME_MAX_HEIGHT : '');
+    var lowered = gui.autoexpose && k < scaleDigits(requestedScale());
+    var current = gui.scaleMode == 'steepness' ? gui.steepness : gui.heightScale;
+    var notes = (climate ? '\nsuggested climate: ' + climate : '') + (lowered ?
+      '\n' + gui.scaleMode + ' lowered from ' + requestedText + ' to ' + current + ' so the highest point fits under ' + GAME_MAX_HEIGHT : '');
     if (!shown.length) {
       setBoxWater('no flat water surfaces found' + depthNote + notes);
       return;
@@ -482,8 +549,6 @@ map = (function () {
     uniforms.u_min = h.min / h.k;
     uniforms.u_max = h.max / h.k;
     scene.requestRedraw();
-    gui.scaleFactor = ((h.max - h.min) / h.k / heightmapExport.groundWidth(exportBounds())) + '';
-    controller('scaleFactor').updateDisplay();
   }
 
   function setStatus(text) {
@@ -524,7 +589,8 @@ map = (function () {
   }
 
   async function buildHeightmap() {
-    // Fails fast on a bad ocean floor rather than after fetching every tile.
+    // Fails fast on bad input rather than after fetching every tile.
+    requestedScale();
     heightFloor();
     var h = readHeights();
     var meta = {heightScale: h.k, waterLevel: h.water};
@@ -538,8 +604,8 @@ map = (function () {
       // Full resolution can find a higher peak than the preview, which moves the auto scale and the water level with it.
       limits: function(peak) {
         var scale = gui.heightScale, limits = heightLimits(peak);
-        if (gui.heightScale != scale && analysis) {
-          applyAnalysis();
+        if (gui.heightScale != scale) {
+          if (gui.autoexpose && analysis) applyAnalysis();
           h = readHeights();
           Object.assign(meta, {heightScale: h.k, waterLevel: h.water});
         }
@@ -554,6 +620,7 @@ map = (function () {
         return {min: h.min / h.k, max: h.max / h.k};
       },
       bathymetryLevel: gui.include_oceans ? h.water / h.k : null,
+      northLeft: northLeft(),
       meta: meta,
       onProgress: function(fraction) {
         setStatus('Fetching elevation tiles... ' + Math.round(fraction * 100) + '%');
@@ -574,7 +641,7 @@ map = (function () {
     var m = r.meta, h = r.heights;
     return [
       'Transport Fever import: Minimum Height ' + h.min + ', Maximum Height ' + h.max + ', Water Level ' + h.water,
-      'height scale ' + h.k + ', real elevations ' + m.blackMeters.toFixed(2) + ' to ' + m.whiteMeters.toFixed(2) + ' m',
+      'height scale ' + h.k + ', ' + steepnessText(h.k) + 'x real steepness, real elevations ' + m.blackMeters.toFixed(2) + ' to ' + m.whiteMeters.toFixed(2) + ' m',
       'water depth: ' + (m.bathymetry || 'ocean data off, below sea level clamped to 0 m'),
       m.cappedFraction > 0 ? (m.cappedFraction * 100).toFixed(2) + '% of the map was above the game\'s ' + GAME_MAX_HEIGHT + ' m limit and was flattened. Lower the height scale to keep those peaks.' : null,
       'real ' + (m.metersPerPixel * (m.width - 1) / 1000).toFixed(2) + ' x ' + (m.metersPerPixel * (m.height - 1) / 1000).toFixed(2) + ' km at ' + m.metersPerPixel.toFixed(3) + ' m/px',
@@ -600,6 +667,7 @@ map = (function () {
       climate: gui.climate,
       waterLevel: h.water / h.k,
       volcanoes: volcanoes,
+      northLeft: northLeft(),
       onStage: setStatus
     });
     result.volcanoCount = volcanoes.length;
@@ -631,7 +699,8 @@ map = (function () {
       height: out.height,
       maxTowns: Math.round(gui.maxTowns),
       minSpacing: Number(gui.townSpacing),
-      includeVillages: gui.includeVillages
+      includeVillages: gui.includeVillages,
+      northLeft: northLeft()
     });
     townLayer.clearLayers().addTo(map);
     result.towns.forEach(function(t) {
@@ -664,8 +733,8 @@ map = (function () {
       var result = await buildBiomes();
       var files = biomeFiles(result, exportName());
       files.forEach(function(f) { saveAs(f.blob, f.path); });
-      var out = outputSize();
-      setStatus(['Saved ' + files.map(function(f) { return f.path; }).join(', ') + ', ' + out.width + 'x' + out.height + ', ' + gui.climate]
+      var image = imageSize();
+      setStatus(['Saved ' + files.map(function(f) { return f.path; }).join(', ') + ', ' + image.width + 'x' + image.height + ', ' + gui.climate]
         .concat(biomeSummary(result), ['Put them in the game\'s biomes folder and import them after the heightmap.']).join('\n'));
     });
   }

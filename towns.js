@@ -58,7 +58,7 @@ var townExport = (function () {
   }
 
   async function build(options) {
-    const {bounds, width, height, maxTowns, minSpacing, includeVillages} = options;
+    const {bounds, width, height, maxTowns, minSpacing, includeVillages, northLeft} = options;
     const types = includeVillages ? 'city|town|village' : 'city|town';
     const places = await overpass.nodes(bounds, `["place"~"^(${types})$"]`);
     const nw = heightmapExport.project(bounds.north, bounds.west);
@@ -74,7 +74,7 @@ var townExport = (function () {
       const x = snap(((p.x - nw.x) / (se.x - nw.x) - 0.5) * 2 * halfX);
       const y = snap((0.5 - (p.y - nw.y) / (se.y - nw.y)) * 2 * halfY);
       if (Math.abs(x) > halfX - EDGE_MARGIN || Math.abs(y) > halfY - EDGE_MARGIN) continue;
-      candidates.push({name: name, x: x, y: y, lat: place.lat, lng: place.lon, population: population(place.tags)});
+      candidates.push({name: name, x: northLeft ? -y : x, y: northLeft ? x : y, lat: place.lat, lng: place.lon, population: population(place.tags)});
     }
     candidates.sort((a, b) => b.population - a.population);
 
