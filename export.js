@@ -920,7 +920,8 @@ var heightmapExport = (function () {
     } catch (e) {
       cover = null;
     }
-    const {floor, ceiling} = limits(highest(heights));
+    const peak = highest(heights);
+    const {floor, ceiling} = limits(peak);
     let extremes = clampAndMeasure(heights, floor, ceiling);
     const cellSize = groundWidth(region) / (width - 1);
     const {surfaces: water, floodShare} = findWaterSurfaces(heights, width, height, cellSize * cellSize, floor, ceiling, cover);
@@ -931,7 +932,7 @@ var heightmapExport = (function () {
     if (smoothing) smoothLand(heights, width, height, smoothing * (width - 1) / (outputWidth - 1), sea ? sea.level : -Infinity);
     if (sea || smoothing) extremes = clampAndMeasure(heights, floor, ceiling);
     return {
-      min: extremes.lo, max: extremes.hi, groundWidth: groundWidth(region), areaKm2: areaKm2,
+      min: extremes.lo, max: extremes.hi, peak: peak, groundWidth: groundWidth(region), areaKm2: areaKm2,
       water: water, floodShare: floodShare, bathymetry: bathymetry,
       landCover: landCover, centerLat: yToLat((region.y0 + region.y1) / 2)
     };
@@ -954,12 +955,14 @@ var heightmapExport = (function () {
       onStage('Fetching water depths...');
       bathymetry = await applyBathymetry(heights, width, height, region, submerge);
     }
+    // limits sees the peak before smoothing, the same one the preview measures.
+    const peak = highest(heights);
     if (smoothing) {
       onStage('Smoothing terrain...');
       smoothLand(heights, width, height, smoothing, waterLevel);
     }
 
-    const {floor, ceiling} = limits(highest(heights));
+    const {floor, ceiling} = limits(peak);
     const {lo, hi, capped} = clampAndMeasure(heights, floor, ceiling);
     const levels = range(lo, hi);
     const black = levels.min, white = levels.max;
