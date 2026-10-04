@@ -30,6 +30,8 @@ map = (function () {
   const STEEPNESS_WARNING = 4;
   // In-game meters of dry land a town's center needs before water. In game tests, towns closer than this never grew.
   const TOWN_SITE_CLEARANCE = 40;
+  // In-game meters the nudge options may move a town to reach a safe site.
+  const TOWN_NUDGE_REACH = 200;
   const SIGN_GLYPHS = {warning: '\u26a0\ufe0e', info: '\u24d8'};
   // The game has one water level, so a lake's level drowns all lower land. Auto mode skips levels drowning more than this share of the map.
   const MAX_FLOOD_SHARE = 0.15;
@@ -229,7 +231,7 @@ map = (function () {
     townFolder.add(gui, 'townSpacing', 0, 5000).step(50).name('min town spacing (m)');
     townFolder.add(gui, 'includeVillages').name('include villages');
     townFolder.add(gui, 'townNames', ['latin alphabet', 'original']).name('town names');
-    townFolder.add(gui, 'townSafety', ['none', 'skip dangerous']).name('generation safety');
+    townFolder.add(gui, 'townSafety', {'none': 'none', 'skip dangerous': 'skip', 'nudge-skip': 'nudge', 'nudge-force': 'force'}).name('generation safety');
     gui.exportTowns = function () { exportTowns(); };
     townFolder.add(gui, 'exportTowns').name('export towns');
     townFolder.open();
@@ -864,7 +866,7 @@ map = (function () {
       name: exportName(), mapName: mapName(), climate: gui.climate, bitDepth: Number(gui.bitDepth), smoothing: gui.smoothing,
       auto: gui.autoexpose, oceans: gui.include_oceans, oceanFloor: needsHeights ? oceanFloor() : 0,
       request: needsHeights ? scaleRequest() : null, heights: needsHeights ? readHeights() : null, analysis: analysis,
-      towns: {maxTowns: Math.round(gui.maxTowns), minSpacing: Number(gui.townSpacing), includeVillages: gui.includeVillages, originalNames: gui.townNames == 'original', skipDangerous: gui.townSafety == 'skip dangerous'},
+      towns: {maxTowns: Math.round(gui.maxTowns), minSpacing: Number(gui.townSpacing), includeVillages: gui.includeVillages, originalNames: gui.townNames == 'original', safety: gui.townSafety},
       view: viewKey()
     };
   }
@@ -938,7 +940,7 @@ map = (function () {
       updateHints();
     }
     console.log('heightmap export', result.meta);
-    return {blob: result.blob, meta: result.meta, heights: h};
+    return {blob: result.blob, meta: result.meta, heights: h, terrain: result.terrain};
   }
 
   function heightmapSummary(r, job) {
@@ -1003,40 +1005,58 @@ map = (function () {
   }
 
   // h: the in-game heights the water comes from, when they differ from the job's.
-  async function buildTowns(job, report, h) {
+  // terrain: the heightmap's own heights. Without it, each town site check fetches its own tiles.
+  async function buildTowns(job, report, h, terrain) {
     var waterline = waterlineFor(job, h);
+    var safety = job.towns.safety;
+    var reach = safety == 'nudge' || safety == 'force' ? TOWN_NUDGE_REACH : 0;
     var result = await townExport.build(Object.assign({
       bounds: job.bounds,
       width: job.out.width,
       height: job.out.height,
       northLeft: job.northLeft,
       onStage: report,
-      waterNear: function(px, py) {
-        return heightmapExport.waterNear(job.bounds, job.out.width, job.out.height, px, py, TOWN_SITE_CLEARANCE / GAME_METERS_PER_PIXEL, waterline);
+      reach: reach,
+      keepUnsafe: safety == 'none',
+      findSite: function(px, py) {
+        return heightmapExport.townSite(job.bounds, job.out.width, job.out.height, px, py, {
+          clearance: TOWN_SITE_CLEARANCE / GAME_METERS_PER_PIXEL, reach: reach / GAME_METERS_PER_PIXEL, waterline: waterline, overLand: safety == 'nudge', terrain: terrain
+        });
       }
     }, job.towns));
-    // Yellow towns are safe, orange ones are exported but may never grow, and red ones were skipped.
+    // Yellow towns are safe, orange ones are exported but may never grow, blue ones were moved to a safe site, and red ones were skipped.
     townLayer.clearLayers().addTo(map);
-    result.towns.concat(result.skipped).forEach(function(t) {
-      var skipped = result.skipped.indexOf(t) >= 0;
-      L.circleMarker([t.lat, t.lng], {radius: 4, color: skipped ? '#ff3030' : t.wet ? '#ff8c00' : '#ffcc00', weight: 2, fillOpacity: 0.8})
-        .bindTooltip(t.name + (skipped ? ', skipped' : ', size ' + t.size) + (t.wet ? ', within ' + TOWN_SITE_CLEARANCE + ' m of water' : ''))
+    result.towns.forEach(function(t) {
+      var color = t.from ? '#3399ff' : t.unsafe ? '#ff8c00' : '#ffcc00';
+      if (t.from) L.polyline([[t.from.lat, t.from.lng], [t.lat, t.lng]], {color: color, weight: 1, dashArray: '3 3'}).addTo(townLayer);
+      L.circleMarker([t.lat, t.lng], {radius: 4, color: color, weight: 2, fillOpacity: 0.8})
+        .bindTooltip(t.name + ', size ' + t.size + (t.from ? ', moved ' + Math.round(t.moved) + ' m' : t.unsafe ? ', within ' + TOWN_SITE_CLEARANCE + ' m of water' : ''))
+        .addTo(townLayer);
+    });
+    result.skipped.forEach(function(t) {
+      L.circleMarker([t.lat, t.lng], {radius: 4, color: '#ff3030', weight: 2, fillOpacity: 0.8})
+        .bindTooltip(t.name + ', skipped, ' + (reach ? 'no safe site within ' + reach + ' m' : 'within ' + TOWN_SITE_CLEARANCE + ' m of water'))
         .addTo(townLayer);
     });
     return result;
   }
 
-  function townSummary(result) {
+  function townSummary(result, job) {
     var names = result.towns.map(function(t) { return t.name; });
     var lines = [
       result.towns.length + ' towns, chosen from ' + result.candidates + ' places inside the map',
       names.slice(0, 10).join(', ') + (names.length > 10 ? ', ...' : '')
     ];
-    var list = function(towns) {
-      return towns.slice(0, 10).map(function(t) { return t.name; }).join(', ') + (towns.length > 10 ? ', ...' : '');
+    var list = function(towns, label) {
+      return towns.slice(0, 10).map(label || function(t) { return t.name; }).join(', ') + (towns.length > 10 ? ', ...' : '');
     };
-    var risky = result.towns.filter(function(t) { return t.wet; });
-    if (result.skipped.length) lines.push('skipped within ' + TOWN_SITE_CLEARANCE + ' m of water: ' + list(result.skipped));
+    var nudged = result.towns.filter(function(t) { return t.from; });
+    var risky = result.towns.filter(function(t) { return t.unsafe && !t.from; });
+    if (nudged.length) lines.push('nudged: ' + list(nudged, function(t) { return t.name + ' ' + Math.round(t.moved) + ' m'; }));
+    if (result.skipped.length) {
+      var nudging = job.towns.safety == 'nudge' || job.towns.safety == 'force';
+      lines.push((nudging ? 'skipped, no safe site within ' + TOWN_NUDGE_REACH + ' m: ' : 'skipped within ' + TOWN_SITE_CLEARANCE + ' m of water: ') + list(result.skipped));
+    }
     if (risky.length) lines.push('may never grow, within ' + TOWN_SITE_CLEARANCE + ' m of water: ' + list(risky));
     return lines;
   }
@@ -1070,7 +1090,7 @@ map = (function () {
     queueTask('Towns', async function(job, report) {
       var result = await buildTowns(job, report);
       saveAs(new Blob([result.lua], {type: 'text/plain'}), job.name + '_towns.lua');
-      var lines = townSummary(result);
+      var lines = townSummary(result, job);
       lines[0] = 'Saved ' + lines[0];
       return lines;
     }, true);
@@ -1085,14 +1105,16 @@ map = (function () {
         };
       }
       var heightmap = await buildHeightmap(job, step(1, 'heightmap'));
-      var biomes = await buildBiomes(job, step(2, 'biomes'), heightmap.heights, true);
       // An OpenStreetMap outage shouldn't sink the whole export, so the zip goes out without towns and its name says so.
       var towns = null, townError = null;
       try {
-        towns = await buildTowns(job, step(3, 'towns'), heightmap.heights);
+        towns = await buildTowns(job, step(2, 'towns'), heightmap.heights, heightmap.terrain);
       } catch (e) {
         townError = e.message;
       }
+      // Towns go before biomes so the full-size terrain is freed before biomes builds its own.
+      heightmap.terrain = null;
+      var biomes = await buildBiomes(job, step(3, 'biomes'), heightmap.heights, true);
       var zipName = job.name + (towns ? '' : '_NO_TOWNS') + '.zip';
       report('Writing ' + zipName + '...');
       var files = [{path: 'heightmaps/' + job.name + '.png', blob: heightmap.blob}].concat(biomeFiles(biomes, job.name).map(function(f) {
@@ -1101,7 +1123,7 @@ map = (function () {
       if (towns) files.push({path: 'towns_industries/' + job.name + '.lua', blob: new Blob([towns.lua], {type: 'text/plain'})});
       saveAs(await heightmapExport.zip(files), zipName);
       return ['Saved ' + zipName + ' for ' + job.climate + '. Extract it into the Transport Fever 3 user folder, %APPDATA%\\Transport Fever 3.']
-        .concat(heightmapSummary(heightmap, job).slice(0, 4), biomeSummary(biomes), towns ? townSummary(towns) : ['towns left out because ' + townError]);
+        .concat(heightmapSummary(heightmap, job).slice(0, 4), biomeSummary(biomes), towns ? townSummary(towns, job) : ['towns left out because ' + townError]);
     }, true);
   }
 

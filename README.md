@@ -34,7 +34,12 @@ You now have a fully playable map!
 - include ocean data / ocean floor (m): Water below the water level takes its depth from NOAA's DEM Global Mosaic, which has real depths where the elevation tiles store water as a flat surface, and the ocean floor sets the lowest in-game height allowed. With it off, everything below sea level is clamped to 0 m. The game's lowest minimum height is -100.
 - bit depth: 16-bit grayscale PNG with no alpha channel by default. 8-bit is also available but its height steps are coarse.
 - town names: take latin-character only names or the original accented/character names.
-- generation safety: 'none' picks purely by population with 'dangerous' placements, those which might not work in game because of their proximity to water or lack of nearby land available, shown in orange. 'skip dangerous' will skip those ones instead and take others.
+- generation safety: 
+    - 'none' picks purely by population with 'dangerous' placements, those which might not work in game because of their proximity to water or lack of nearby land available, shown in orange. 
+    - 'skip dangerous' skips those ones instead and takes others.   
+    - 'nudge-skip': moves an unsafe town to the nearest safe pixel within 200 m that it can reach over land. If the center is in water, it starts
+    from the nearest shore. If there's no such pixel, the town is skipped. Nudged towns shown in blue.
+    - 'nudge-force': takes the nearest safe pixel within 200 m in a straight line, even across water. If there's none, the town is skipped. Nudged towns shown in blue.
 - export all: runs the heightmap, biome and town exports and saves them together as `<file name>.zip`.
 - reference map: overlays OpenStreetMap for finding places.
 - screenshot: saves the current view as an 8-bit image for testing.

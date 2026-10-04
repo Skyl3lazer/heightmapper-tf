@@ -74,17 +74,33 @@ var townExport = (function () {
   }
 
   async function build(options) {
-    // waterNear(px, py): resolves true when the site at that output pixel is too close to water. skipDangerous leaves those towns out.
-    const {bounds, width, height, maxTowns, minSpacing, includeVillages, originalNames, northLeft, waterNear, skipDangerous} = options;
+    // findSite(px, py): resolves to the safe output pixel {px, py} a town at that pixel should move to, or null if it has none.
+    // reach: in-game meters findSite may move a town. keepUnsafe: towns with no safe site stay where they are instead of being skipped.
+    const {bounds, width, height, maxTowns, minSpacing, includeVillages, originalNames, northLeft, findSite, keepUnsafe} = options;
+    const reach = options.reach || 0;
     const onStage = options.onStage || function () {};
     const nw = heightmapExport.project(bounds.north, bounds.west);
     const se = heightmapExport.project(bounds.south, bounds.east);
     const halfX = (width - 1) / 2 * GAME_METERS_PER_PIXEL;
     const halfY = (height - 1) / 2 * GAME_METERS_PER_PIXEL;
 
+    // The town to export for candidate c, moved when findSite says so, or null to skip it.
+    async function settle(c) {
+      if (!findSite) return c;
+      const site = await findSite(c.px, c.py);
+      c.unsafe = !site || site.px != c.px || site.py != c.py;
+      if (!site) return keepUnsafe ? c : null;
+      if (!c.unsafe) return c;
+      const x = (site.px - (width - 1) / 2) * GAME_METERS_PER_PIXEL, y = ((height - 1) / 2 - site.py) * GAME_METERS_PER_PIXEL;
+      if (Math.abs(x) > halfX - EDGE_MARGIN || Math.abs(y) > halfY - EDGE_MARGIN) return null;
+      const p = heightmapExport.unproject(nw.x + site.px / (width - 1) * (se.x - nw.x), nw.y + site.py / (height - 1) * (se.y - nw.y));
+      return Object.assign({}, c, site, {x: northLeft ? -y : x, y: northLeft ? x : y, lat: p.lat, lng: p.lng, from: c,
+        moved: GAME_METERS_PER_PIXEL * Math.hypot(site.px - c.px, site.py - c.py)});
+    }
+
     const centerLng = (bounds.west + bounds.east) / 2;
     const candidates = [];
-    let towns = [];
+    let towns = [], skipped = [];
     for (const [tag, plural] of includeVillages ? PLACE_TIERS : PLACE_TIERS.slice(0, 2)) {
       onStage('Looking up ' + plural + '...');
       for (const place of await overpass.nodes(bounds, `["place"="${tag}"]`)) {
@@ -100,14 +116,16 @@ var townExport = (function () {
           px: Math.round(x / GAME_METERS_PER_PIXEL + (width - 1) / 2), py: Math.round((height - 1) / 2 - y / GAME_METERS_PER_PIXEL)});
       }
       candidates.sort((a, b) => b.population - a.population);
-      if (waterNear) onStage('Checking town sites...');
+      if (findSite) onStage('Checking town sites...');
       towns = [];
+      skipped = [];
       for (const c of candidates) {
         if (towns.length >= maxTowns) break;
-        if (!towns.every(t => Math.hypot(t.x - c.x, t.y - c.y) >= minSpacing)) continue;
-        // Only towns that would otherwise be picked get checked, and each only once across the tiers.
-        if (waterNear && c.wet === undefined) c.wet = await waterNear(c.px, c.py);
-        if (!(skipDangerous && c.wet)) towns.push(c);
+        // Only towns that could still be picked get checked, and each only once across the tiers.
+        if (!towns.every(t => Math.hypot(t.x - c.x, t.y - c.y) + reach >= minSpacing)) continue;
+        if (c.town === undefined) c.town = await settle(c);
+        if (!c.town) skipped.push(c);
+        else if (towns.every(t => Math.hypot(t.x - c.town.x, t.y - c.town.y) >= minSpacing)) towns.push(c.town);
       }
       if (towns.length >= maxTowns) break;
     }
@@ -122,7 +140,7 @@ var townExport = (function () {
       t.industrial = INDUSTRIAL_NEEDS[Math.floor(h / 3) % 3];
     });
 
-    return {lua: toLua(towns), towns: towns, candidates: candidates.length, skipped: skipDangerous ? candidates.filter(c => c.wet) : []};
+    return {lua: toLua(towns), towns: towns, candidates: candidates.length, skipped: skipped};
   }
 
   return {build: build};
