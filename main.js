@@ -205,7 +205,7 @@ map = (function () {
     heightScaleHint = addSign(heightScaleRow, 'info');
     var steepnessRow = onEdit(exportFolder.add(gui, 'steepness').name('steepness (x real)'), scaleChanged);
     steepnessWarning = addSign(steepnessRow, 'warning');
-    exportFolder.add(gui, 'smoothing', 0, 100).step(2).name('smoothing (m)').onFinishChange(runAnalysis);
+    exportFolder.add(gui, 'smoothing', 0, 20).step(0.5).name('smoothing (m)').onFinishChange(runAnalysis);
     onEdit(exportFolder.add(gui, 'oceanFloor').name('ocean floor (m)'), runAnalysis);
     bitDepthHint = addSign(exportFolder.add(gui, 'bitDepth', [16, 8]).name('bit depth').onChange(updateHints), 'info');
     // dat.gui only recognizes plain functions as buttons, not async ones.

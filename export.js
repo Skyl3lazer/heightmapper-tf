@@ -635,17 +635,20 @@ var heightmapExport = (function () {
     return note;
   }
 
-  // A Gaussian-like blur of the land, sigma in pixels, from three box passes over normalized sums.
-  // Water at or below level is left out entirely, so no shoreline moves.
-  // Half-width of each of smoothLand's three box passes.
-  function boxRadius(sigma) {
-    return Math.round((Math.sqrt(4 * sigma * sigma + 1) - 1) / 2);
+  // Half-width r and edge share of three box passes that together blur with a standard deviation of sigma pixels.
+  // The share weights the cell just past each end of the box, so the blur grows smoothly instead of a whole pixel at a time.
+  function boxKernel(sigma) {
+    const r = Math.floor((Math.sqrt(4 * sigma * sigma + 1) - 1) / 2);
+    const v = sigma * sigma / 3, a = r * (r + 1) * (2 * r + 1) / 3, b = 2 * r + 1;
+    return {r: r, share: (v * b - a) / (2 * (r + 1) * (r + 1) - 2 * v)};
   }
 
+  // A Gaussian-like blur of the land, sigma in pixels, from three box passes over normalized sums.
+  // Water at or below level is left out entirely, so no shoreline moves.
   // onProgress(fraction): called after each pass, and awaited.
   async function smoothLand(heights, width, height, sigma, level, onProgress) {
-    const r = boxRadius(sigma);
-    if (r < 1) return;
+    if (!(sigma > 0)) return;
+    const {r, share} = boxKernel(sigma);
     const sum = new Float32Array(heights.length), weight = new Float32Array(heights.length);
     for (let i = 0; i < heights.length; i++) {
       if (heights[i] > level) {
@@ -654,21 +657,24 @@ var heightmapExport = (function () {
       }
     }
     for (let pass = 0; pass < 3; pass++) {
-      boxSum(sum, width, height, r);
+      boxSum(sum, width, height, r, share);
       if (onProgress) await onProgress((2 * pass + 1) / 6);
-      boxSum(weight, width, height, r);
+      boxSum(weight, width, height, r, share);
       if (onProgress) await onProgress((2 * pass + 2) / 6);
     }
     for (let i = 0; i < heights.length; i++) if (heights[i] > level) heights[i] = sum[i] / weight[i];
   }
 
   // Replaces each cell with the sum over the square of half-width r around it. Columns go in blocks to stay in cache.
-  function boxSum(grid, width, height, r) {
+  function boxSum(grid, width, height, r, share) {
     const line = new Float64Array(width + 1);
     for (let y = 0; y < height; y++) {
       const row = y * width;
       for (let x = 0; x < width; x++) line[x + 1] = line[x] + grid[row + x];
-      for (let x = 0; x < width; x++) grid[row + x] = line[Math.min(x + r, width - 1) + 1] - line[Math.max(x - r, 0)];
+      for (let x = 0; x < width; x++) {
+        const inner = line[Math.min(x + r, width - 1) + 1] - line[Math.max(x - r, 0)];
+        grid[row + x] = inner + share * (line[Math.min(x + r + 1, width - 1) + 1] - line[Math.max(x - r - 1, 0)] - inner);
+      }
     }
     const block = 32, sums = new Float64Array(block * (height + 1));
     for (let x0 = 0; x0 < width; x0 += block) {
@@ -679,7 +685,11 @@ var heightmapExport = (function () {
       }
       for (let y = 0; y < height; y++) {
         const row = y * width + x0, hi = (Math.min(y + r, height - 1) + 1) * block, lo = Math.max(y - r, 0) * block;
-        for (let b = 0; b < span; b++) grid[row + b] = sums[hi + b] - sums[lo + b];
+        const outerHi = (Math.min(y + r + 1, height - 1) + 1) * block, outerLo = Math.max(y - r - 1, 0) * block;
+        for (let b = 0; b < span; b++) {
+          const inner = sums[hi + b] - sums[lo + b];
+          grid[row + b] = inner + share * (sums[outerHi + b] - sums[outerLo + b] - inner);
+        }
       }
     }
   }
@@ -1017,7 +1027,7 @@ var heightmapExport = (function () {
       return heights;
     }
     // The blur reaches this far, so a margin this wide makes the smoothed patch match the smoothed map.
-    const pad = smoothing ? 3 * boxRadius(smoothing) : 0;
+    const pad = smoothing > 0 ? 3 * (boxKernel(smoothing).r + 1) : 0;
     const full = size + 2 * pad, reach = radius + pad;
     const region = boundsToRegion(bounds);
     const dx = (region.x1 - region.x0) / (width - 1), dy = (region.y1 - region.y0) / (height - 1);
