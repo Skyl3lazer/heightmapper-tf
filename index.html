@@ -95,6 +95,23 @@
             color: #ff8080;
         }
 
+        .field-sign {
+            margin-left: 4px;
+            cursor: help;
+        }
+
+        .field-sign.warning, #export-box-notices .warning {
+            color: #ffb030;
+        }
+
+        #export-box-label.measuring #export-box-notices {
+            display: none;
+        }
+
+        .field-sign.info, #export-box-notices .info {
+            color: #80b8ff;
+        }
+
         #status-message:empty {
             display: none;
         }
@@ -288,7 +305,7 @@
     </div>
     <div id="help-blocker"></div>
     <div id="map"></div>
-    <div id="export-box"><div id="export-box-label"><div id="export-box-size"></div><div id="export-box-water"></div></div></div>
+    <div id="export-box"><div id="export-box-label"><div id="export-box-size"></div><div id="export-box-water"></div><div id="export-box-notices"></div></div></div>
     <div id="status"><div id="tasks"></div><div id="status-message"></div></div>
 
     <!-- 3rd party libraries -->

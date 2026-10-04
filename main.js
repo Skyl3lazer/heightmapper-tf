@@ -10,6 +10,10 @@ map = (function () {
   var analysisGeneration = 0;
   // What the user typed into whichever of height scale and steepness "scale by" picks. Auto mode may show less so high peaks fit under the game's limit.
   var requestedText = '1';
+  var steepnessWarning, heightScaleHint, climateHint, waterHint, bitDepthHint;
+  var signs = [];
+  // The climate follows the analysis's suggestion until the user picks a different one.
+  var climateFollows = true;
   var exportFolder;
   const exportDefaults = {lat: 39.109328, lng: -76.813227, metersPerPixel: 10};
   const RATIOS = ['1:1', '1:2', '1:3', '1:4', '1:5'];
@@ -22,6 +26,9 @@ map = (function () {
   const WATER_DEPTH = 0.5;
   // Real meters above a flat water surface that still count as its shore, since elevation data is about this noisy at the waterline.
   const SHORE_TOLERANCE = 0.5;
+  // Steepness above this tends to look out of place in the game.
+  const STEEPNESS_WARNING = 4;
+  const SIGN_GLYPHS = {warning: '\u26a0\ufe0e', info: '\u24d8'};
   // The game has one water level, so a lake's level drowns all lower land. Auto mode skips levels drowning more than this share of the map.
   const MAX_FLOOD_SHARE = 0.15;
   // ...and levels drowning more than this many times the water body's own area, like a tiny flat patch at the bottom of a dry valley.
@@ -141,7 +148,7 @@ map = (function () {
       else applyManualHeights();
     });
     gui.add(gui, 'minHeight').name('minimum height').onFinishChange(applyManualHeights);
-    gui.add(gui, 'waterLevel').name('water level').onFinishChange(applyManualHeights);
+    waterHint = addSign(gui.add(gui, 'waterLevel').name('water level').onFinishChange(applyManualHeights), 'info');
 
     gui.autoexpose = true;
     gui.add(gui, 'autoexpose').name("auto-exposure").onChange(function(value) {
@@ -180,9 +187,11 @@ map = (function () {
     gui.smoothing = 0;
     gui.oceanFloor = String(GAME_MIN_HEIGHT);
     gui.bitDepth = 16;
-    gui.fileName = 'heightmap';
     exportFolder.add(gui, 'mapSize', Object.keys(MAP_SIZES)).name('map size').onChange(updateExportBox);
-    exportFolder.add(gui, 'climate', CLIMATES).name('climate');
+    climateHint = addSign(exportFolder.add(gui, 'climate', CLIMATES).name('climate').onChange(function(value) {
+      climateFollows = analysis !== null && value == suggestClimate(analysis);
+      updateHints();
+    }), 'info');
     exportFolder.add(gui, 'ratio', RATIOS).name('ratio').onChange(regionChanged);
     exportFolder.add(gui, 'orientation', ['portrait', 'landscape']).name('orientation').onChange(regionChanged);
     exportFolder.add(gui, 'center').name('center (lat, lon)').onFinishChange(applyCenter);
@@ -191,12 +200,13 @@ map = (function () {
       requestedText = {'height scale': gui.heightScale, 'steepness': gui.steepness, 'max height': gui.maxHeight}[mode];
       updateEditable();
     });
-    exportFolder.add(gui, 'heightScale').name('height scale').onFinishChange(scaleChanged);
-    exportFolder.add(gui, 'steepness').name('steepness (x real)').onFinishChange(scaleChanged);
+    var heightScaleRow = exportFolder.add(gui, 'heightScale').name('height scale').onFinishChange(scaleChanged);
+    heightScaleHint = addSign(heightScaleRow, 'info');
+    var steepnessRow = exportFolder.add(gui, 'steepness').name('steepness (x real)').onFinishChange(scaleChanged);
+    steepnessWarning = addSign(steepnessRow, 'warning');
     exportFolder.add(gui, 'smoothing', 0, 100).step(2).name('smoothing (m)').onFinishChange(runAnalysis);
     exportFolder.add(gui, 'oceanFloor').name('ocean floor (m)').onFinishChange(runAnalysis);
-    exportFolder.add(gui, 'bitDepth', [16, 8]).name('bit depth');
-    exportFolder.add(gui, 'fileName').name('file name');
+    bitDepthHint = addSign(exportFolder.add(gui, 'bitDepth', [16, 8]).name('bit depth').onChange(updateHints), 'info');
     // dat.gui only recognizes plain functions as buttons, not async ones.
     gui.exportHeightmap = function () { exportRegion(); };
     exportFolder.add(gui, 'exportHeightmap').name('export heightmap');
@@ -218,6 +228,8 @@ map = (function () {
     townFolder.add(gui, 'exportTowns').name('export towns');
     townFolder.open();
 
+    gui.fileName = 'heightmap';
+    gui.add(gui, 'fileName').name('file name');
     gui.exportAll = function () { exportAll(); };
     gui.add(gui, 'exportAll').name('export all');
 
@@ -288,6 +300,7 @@ map = (function () {
     gui.metersPerPixel = mpp.toFixed(3);
     // Steepness mode waits for the analysis, which also fits the scale under the game's limit.
     if (gui.scaleMode == 'height scale' && Number(gui.heightScale) > 0) gui.steepness = steepnessText(Number(gui.heightScale), mpp);
+    showSteepnessWarning();
     exportFolder.__controllers.forEach(function(c) { c.updateDisplay(); });
   }
 
@@ -388,11 +401,70 @@ map = (function () {
     return Number((Math.floor(k / unit + 1e-9) * unit).toPrecision(4));
   }
 
-  function showScale(k) {
+  // lowered: auto-exposure brought k under the requested scale to fit the game's height limit.
+  function showScale(k, lowered) {
     gui.heightScale = String(k);
     gui.steepness = steepnessText(k, metersPerPixel());
+    showSteepnessWarning();
+    showSign(heightScaleHint, lowered ? "Height scale has been modified to keep the max height below the game's limit" : null);
     controller('heightScale').updateDisplay();
     controller('steepness').updateDisplay();
+  }
+
+  // A caution or information sign after a field's name, hidden until shown.
+  function addSign(row, kind) {
+    var name = row.domElement.parentNode.querySelector('.property-name');
+    var sign = document.createElement('span');
+    sign.className = 'field-sign ' + kind;
+    sign.textContent = SIGN_GLYPHS[kind];
+    sign.style.display = 'none';
+    sign.kind = kind;
+    sign.field = name.textContent.replace(/\s*\(.*\)$/, '');
+    name.appendChild(sign);
+    signs.push(sign);
+    return sign;
+  }
+
+  // text: the explanation shown on hover, or null to hide the sign.
+  function showSign(sign, text) {
+    sign.title = text || '';
+    sign.style.display = text ? '' : 'none';
+    showNotices();
+  }
+
+  // The box label's last rows list the fields showing each kind of sign.
+  function showNotices() {
+    var box = document.getElementById('export-box-notices');
+    box.textContent = '';
+    ['info', 'warning'].forEach(function(kind) {
+      var fields = signs.filter(function(s) { return s.kind == kind && s.style.display != 'none'; }).map(function(s) { return s.field; });
+      if (!fields.length) return;
+      var line = box.appendChild(document.createElement('div'));
+      line.className = kind;
+      line.textContent = SIGN_GLYPHS[kind] + ' ' + fields.join(', ');
+    });
+  }
+
+  function showSteepnessWarning() {
+    showSign(steepnessWarning, Number(gui.steepness) > STEEPNESS_WARNING ?
+      'Steepness values above ' + STEEPNESS_WARNING + ' can look out of place, consider changing your "scale by"' : null);
+  }
+
+  // Information signs on fields set away from what the analysis would pick.
+  function updateHints() {
+    var climate = analysis ? suggestClimate(analysis) : null;
+    showSign(climateHint, climate && climate != gui.climate ? 'The suggested climate is ' + climate : null);
+    var water = suggestedWaterLevel();
+    showSign(waterHint, water !== null && water != Number(gui.waterLevel) ? 'The most common water level in this section is ' + water : null);
+    showSign(bitDepthHint, Number(gui.bitDepth) != 16 ? '16 is recommended for game export' : null);
+  }
+
+  // The level auto-exposure would pick, or null when no water body qualifies.
+  function suggestedWaterLevel() {
+    var k = Number(gui.heightScale);
+    if (!analysis || !(k > 0)) return null;
+    var choice = autoWaterChoice(waterChoices(analysis.water, k, analysis.floodShare, gui.include_oceans), analysis.areaKm2);
+    return choice ? choice.level : null;
   }
 
   function scaleChanged(value) {
@@ -429,8 +501,9 @@ map = (function () {
   }
 
   function heightLimits(peak) {
-    var k = gui.autoexpose ? fittedScale(requestedScale(peak), peak) : scaleDigits(requestedScale(peak));
-    showScale(k);
+    var requested = requestedScale(peak);
+    var k = gui.autoexpose ? fittedScale(requested, peak) : scaleDigits(requested);
+    showScale(k, k < scaleDigits(requested));
     return limitsFor(k, oceanFloor());
   }
 
@@ -454,6 +527,11 @@ map = (function () {
     document.getElementById('export-box-water').textContent = text;
   }
 
+  // The notice rows describe the last analysis, so they hide while a new one runs.
+  function setMeasuring(on) {
+    document.getElementById('export-box-label').classList.toggle('measuring', on);
+  }
+
   var scheduleAnalysis = debounce(runAnalysis, 300);
 
   async function runAnalysis() {
@@ -461,6 +539,7 @@ map = (function () {
     try {
       var out = outputSize();
       setBoxWater('measuring...');
+      setMeasuring(true);
       var result = await heightmapExport.analyze({
         bounds: exportBounds(),
         aspect: (out.width - 1) / (out.height - 1),
@@ -474,11 +553,20 @@ map = (function () {
         outputWidth: out.width
       });
     } catch (e) {
-      if (generation == analysisGeneration) setBoxWater(e.message);
+      if (generation == analysisGeneration) {
+        setBoxWater(e.message);
+        setMeasuring(false);
+      }
       return;
     }
     if (generation != analysisGeneration) return;
+    setMeasuring(false);
     analysis = result;
+    var climate = suggestClimate(analysis);
+    if (climate && climateFollows && gui.climate != climate) {
+      gui.climate = climate;
+      controller('climate').updateDisplay();
+    }
     if (gui.autoexpose) applyAnalysis();
     else describeWater();
   }
@@ -516,6 +604,7 @@ map = (function () {
   }
 
   function describeWater() {
+    updateHints();
     try {
       var k = heightScale();
     } catch (e) {
@@ -524,19 +613,14 @@ map = (function () {
     }
     var shown = waterChoices(analysis.water, k, analysis.floodShare, gui.include_oceans).filter(function(c, i) { return i == 0 || c.areaKm2 >= 0.1; });
     var depthNote = analysis.bathymetry && /unavailable/.test(analysis.bathymetry) ? ' (' + analysis.bathymetry + ')' : '';
-    var climate = suggestClimate(analysis);
-    var lowered = gui.autoexpose && k < scaleDigits(requestedScale(analysis.peak));
-    var current = gui.scaleMode == 'steepness' ? gui.steepness : gui.heightScale;
-    var notes = (climate ? '\nsuggested climate: ' + climate : '') + (lowered ?
-      '\n' + gui.scaleMode + ' lowered from ' + requestedText + ' to ' + current + ' so the highest point fits under ' + GAME_MAX_HEIGHT : '');
     if (!shown.length) {
-      setBoxWater('no flat water surfaces found' + depthNote + notes);
+      setBoxWater('no flat water surfaces found' + depthNote);
       return;
     }
     setBoxWater('water levels: ' + shown.slice(0, 4).map(function(c) {
       var flood = c.flood > MAX_FLOOD_SHARE ? ', floods ' + Math.round(c.flood * 100) + '% of the map' : '';
       return c.level + ' (' + c.areaKm2.toFixed(1) + ' km2' + flood + ')';
-    }).join(', ') + depthNote + notes);
+    }).join(', ') + depthNote);
   }
 
   // A rule of thumb from latitude and natural land cover. No data, water, built area and cloud (Impact Observatory 0, 1, 7, 10) are left out.
@@ -756,6 +840,7 @@ map = (function () {
     var meta = {heightScale: h.k, waterLevel: h.water, smoothing: job.smoothing};
     // A water level under the minimum means the map has no water, so nothing is carved and the level follows the final minimum.
     var dry = h.water < h.min;
+    var lowered = false;
     report('Fetching elevation tiles...', 0);
     var result = await heightmapExport.render({
       bounds: job.bounds,
@@ -764,7 +849,9 @@ map = (function () {
       bitDepth: job.bitDepth,
       // Full resolution can find a higher peak than the preview, which moves the auto scale and the water level with it.
       limits: function(peak) {
-        var k = job.auto ? fittedScale(scaleFor(job.request, peak), peak) : h.k;
+        var requested = scaleFor(job.request, peak);
+        var k = job.auto ? fittedScale(requested, peak) : h.k;
+        lowered = job.auto && k < scaleDigits(requested);
         if (k != h.k && job.analysis) {
           h = heightsFor(job.analysis, k, job.oceans, fixedMax(job.request));
           Object.assign(meta, {heightScale: h.k, waterLevel: h.water});
@@ -793,12 +880,13 @@ map = (function () {
     });
     // The fields show the final values, as long as they still describe this export.
     if (job.auto && viewKey() == job.view) {
-      showScale(h.k);
+      showScale(h.k, lowered);
       gui.minHeight = String(h.min);
       gui.maxHeight = String(h.max);
       gui.waterLevel = String(h.water);
       refreshGUI();
       updateDisplayRange();
+      updateHints();
     }
     console.log('heightmap export', result.meta);
     return {blob: result.blob, meta: result.meta, heights: h};
