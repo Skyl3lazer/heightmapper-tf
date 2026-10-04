@@ -13,6 +13,96 @@ var townExport = (function () {
   const PLACE_TIERS = [['city', 'cities'], ['town', 'towns'], ['village', 'villages']];
   const COMMERCIAL_NEEDS = ['vegetables', 'fish', 'meat'];
   const INDUSTRIAL_NEEDS = ['bricks', 'planks', 'fuel'];
+  // The game starts every town with one straight street centered on its position. A town whose street can't be built never grows.
+  const STREET_HALF_LENGTH = 44;
+  // The game's limits are 0.40 and 8 m. Its heights differ from bilinear sampling by up to 0.75 m, so these keep a margin.
+  const MAX_STREET_GRADE = 0.38;
+  const MIN_WATER_GAP = 9;
+  // In-game water covers this far around each height sample at or below the water level.
+  const WATER_CELL_HALF = 4;
+
+  // The game seeds one minstd_rand step with the position, so every meter a town moves turns its street.
+  function streetAngle(x, y) {
+    let seed = ((Math.trunc(x) + Math.trunc(y)) >>> 0) % 2147483647;
+    if (seed === 0) seed = 1;
+    const next = (seed * 48271) % 2147483647;
+    return Math.fround(Math.fround(Math.fround(Math.fround(next) - 1) * Math.fround(2 ** -31)) * Math.fround(6.2831855));
+  }
+
+  // Street checks for towns near the center of a patch of real heights 2 r + 1 output pixels wide, north up.
+  // Positions u and v are meters east and north of the patch center.
+  function streetTester(heights, r, waterline, heightScale) {
+    const size = 2 * r + 1, half = r * GAME_METERS_PER_PIXEL, span = 2 * half + 1;
+    const water = new Uint8Array(span * span);
+    for (let j = 0; j < size; j++) {
+      for (let i = 0; i < size; i++) {
+        if (heights[j * size + i] > waterline) continue;
+        const a = i * GAME_METERS_PER_PIXEL, b = j * GAME_METERS_PER_PIXEL;
+        for (let y = Math.max(0, b - WATER_CELL_HALF); y <= Math.min(span - 1, b + WATER_CELL_HALF); y++) {
+          water.fill(1, y * span + Math.max(0, a - WATER_CELL_HALF), y * span + Math.min(span - 1, a + WATER_CELL_HALF) + 1);
+        }
+      }
+    }
+    // Everything closer to water than a street may come, on a 1 m grid.
+    // Street points round to the nearest cell, so the band reaches half a cell diagonal further to stay on the safe side.
+    const gap = MIN_WATER_GAP + Math.SQRT1_2, edge = Math.ceil(gap);
+    const blocked = water.slice(), disk = [];
+    for (let y = -edge; y <= edge; y++) {
+      for (let x = -edge; x <= edge; x++) if (x * x + y * y < gap * gap) disk.push(y * span + x);
+    }
+    for (let y = edge; y < span - edge; y++) {
+      for (let x = edge; x < span - edge; x++) {
+        const k = y * span + x;
+        if (water[k] && !(water[k - 1] && water[k + 1] && water[k - span] && water[k + span])) disk.forEach(o => { blocked[k + o] = 1; });
+      }
+    }
+    const cell = (u, v) => (half - Math.round(v)) * span + Math.round(u) + half;
+    const level = (u, v) => {
+      const fi = r + u / GAME_METERS_PER_PIXEL, fj = r - v / GAME_METERS_PER_PIXEL;
+      const i = Math.min(Math.floor(fi), size - 2), j = Math.min(Math.floor(fj), size - 2), x = fi - i, y = fj - j, k = j * size + i;
+      return heightScale * ((heights[k] * (1 - x) + heights[k + 1] * x) * (1 - y) + (heights[k + size] * (1 - x) + heights[k + size + 1] * x) * y);
+    };
+    return {
+      // What stops the street of a town at (u, v), running along (du, dv), from being built.
+      problems: function (u, v, du, dv) {
+        const problems = [];
+        const rise = level(u + STREET_HALF_LENGTH * du, v + STREET_HALF_LENGTH * dv) - level(u - STREET_HALF_LENGTH * du, v - STREET_HALF_LENGTH * dv);
+        if (Math.abs(rise) / (2 * STREET_HALF_LENGTH) > MAX_STREET_GRADE) problems.push('too steep');
+        for (let s = -STREET_HALF_LENGTH; s <= STREET_HALF_LENGTH; s += 0.5) {
+          if (blocked[cell(u + s * du, v + s * dv)]) {
+            problems.push('near water');
+            break;
+          }
+        }
+        return problems;
+      },
+      // Whether (u, v) joins the center over land within reach, starting from the nearest shore when the center is in water.
+      connected: function (reach) {
+        const inReach = k => (k % span - half) ** 2 + (Math.floor(k / span) - half) ** 2 <= reach * reach;
+        const reached = new Uint8Array(span * span), queue = [];
+        let nearest = Infinity;
+        for (let k = 0; k < span * span; k++) {
+          const d = (k % span - half) ** 2 + (Math.floor(k / span) - half) ** 2;
+          if (water[k] || d > reach * reach || d > nearest) continue;
+          if (d < nearest) queue.length = 0;
+          nearest = d;
+          queue.push(k);
+        }
+        queue.forEach(k => { reached[k] = 1; });
+        // Four neighbors, so land touching only at a corner doesn't count as connected across the water between.
+        for (let n = 0; n < queue.length; n++) {
+          const k = queue[n], x = k % span;
+          for (const q of [x > 0 ? k - 1 : -1, x < span - 1 ? k + 1 : -1, k - span, k + span]) {
+            if (q >= 0 && q < span * span && !water[q] && !reached[q] && inReach(q)) {
+              reached[q] = 1;
+              queue.push(q);
+            }
+          }
+        }
+        return (u, v) => reached[cell(u, v)] === 1;
+      }
+    };
+  }
 
   function population(tags) {
     const count = parseInt(String(tags.population || '').replace(/[,\s]/g, ''), 10);
@@ -74,28 +164,50 @@ var townExport = (function () {
   }
 
   async function build(options) {
-    // findSite(px, py): resolves to the safe output pixel {px, py} a town at that pixel should move to, or null if it has none.
-    // reach: in-game meters findSite may move a town. keepUnsafe: towns with no safe site stay where they are instead of being skipped.
-    const {bounds, width, height, maxTowns, minSpacing, includeVillages, originalNames, northLeft, findSite, keepUnsafe} = options;
+    // terrainPatch(px, py, radius): resolves to the real heights in meters of the output pixels within radius of (px, py), north up.
+    // waterline: real meters at or below which the map is water. heightScale: in-game meters per real meter.
+    // reach: whole in-game meters a town may move to a position whose street can be built. overLand: the move may not cross water.
+    // keepUnsafe: a town with no such position stays where it is instead of being skipped.
+    const {bounds, width, height, maxTowns, minSpacing, includeVillages, originalNames, northLeft, terrainPatch, waterline, heightScale, overLand, keepUnsafe} = options;
     const reach = options.reach || 0;
     const onStage = options.onStage || function () {};
     const nw = heightmapExport.project(bounds.north, bounds.west);
     const se = heightmapExport.project(bounds.south, bounds.east);
     const halfX = (width - 1) / 2 * GAME_METERS_PER_PIXEL;
     const halfY = (height - 1) / 2 * GAME_METERS_PER_PIXEL;
+    const moves = [];
+    for (let dy = -reach; dy <= reach; dy++) {
+      for (let dx = -reach; dx <= reach; dx++) if (dx * dx + dy * dy <= reach * reach) moves.push([dx, dy]);
+    }
+    moves.sort((a, b) => a[0] * a[0] + a[1] * a[1] - b[0] * b[0] - b[1] * b[1]);
 
-    // The town to export for candidate c, moved when findSite says so, or null to skip it.
+    // The town to export for candidate c: where it is, at the nearest position within reach whose street can be built, or null to skip it.
     async function settle(c) {
-      if (!findSite) return c;
-      const site = await findSite(c.px, c.py);
-      c.unsafe = !site || site.px != c.px || site.py != c.py;
-      if (!site) return keepUnsafe ? c : null;
-      if (!c.unsafe) return c;
-      const x = (site.px - (width - 1) / 2) * GAME_METERS_PER_PIXEL, y = ((height - 1) / 2 - site.py) * GAME_METERS_PER_PIXEL;
-      if (Math.abs(x) > halfX - EDGE_MARGIN || Math.abs(y) > halfY - EDGE_MARGIN) return null;
-      const p = heightmapExport.unproject(nw.x + site.px / (width - 1) * (se.x - nw.x), nw.y + site.py / (height - 1) * (se.y - nw.y));
-      return Object.assign({}, c, site, {x: northLeft ? -y : x, y: northLeft ? x : y, lat: p.lat, lng: p.lng, from: c,
-        moved: GAME_METERS_PER_PIXEL * Math.hypot(site.px - c.px, site.py - c.py)});
+      if (!terrainPatch) return c;
+      const r = Math.ceil((reach + STREET_HALF_LENGTH + MIN_WATER_GAP + WATER_CELL_HALF) / GAME_METERS_PER_PIXEL) + 1;
+      const tester = streetTester(await terrainPatch(c.px, c.py, r), r, waterline, heightScale);
+      const east = (c.px - (width - 1) / 2) * GAME_METERS_PER_PIXEL, north = ((height - 1) / 2 - c.py) * GAME_METERS_PER_PIXEL;
+      let connected = null;
+      for (const [dx, dy] of moves) {
+        // Moves and the street angle are in the game's frame, which a landscape export turns against the patch.
+        const u = northLeft ? dy : dx, v = northLeft ? -dx : dy;
+        if (Math.abs(east + u) > halfX - EDGE_MARGIN || Math.abs(north + v) > halfY - EDGE_MARGIN) continue;
+        if (connected && !connected(u, v)) continue;
+        const angle = streetAngle(c.x + dx, c.y + dy);
+        const problems = northLeft ? tester.problems(u, v, Math.sin(angle), -Math.cos(angle)) : tester.problems(u, v, Math.cos(angle), Math.sin(angle));
+        if (!dx && !dy) {
+          c.problems = problems;
+          if (!problems.length) return c;
+          if (!reach) return keepUnsafe ? c : null;
+          if (overLand) connected = tester.connected(reach);
+          continue;
+        }
+        if (problems.length) continue;
+        const px = c.px + u / GAME_METERS_PER_PIXEL, py = c.py - v / GAME_METERS_PER_PIXEL;
+        const p = heightmapExport.unproject(nw.x + px / (width - 1) * (se.x - nw.x), nw.y + py / (height - 1) * (se.y - nw.y));
+        return Object.assign({}, c, {x: c.x + dx, y: c.y + dy, px: px, py: py, lat: p.lat, lng: p.lng, from: c, moved: Math.hypot(dx, dy)});
+      }
+      return keepUnsafe ? c : null;
     }
 
     const centerLng = (bounds.west + bounds.east) / 2;
@@ -116,7 +228,7 @@ var townExport = (function () {
           px: Math.round(x / GAME_METERS_PER_PIXEL + (width - 1) / 2), py: Math.round((height - 1) / 2 - y / GAME_METERS_PER_PIXEL)});
       }
       candidates.sort((a, b) => b.population - a.population);
-      if (findSite) onStage('Checking town sites...');
+      if (terrainPatch) onStage('Checking town streets...');
       towns = [];
       skipped = [];
       for (const c of candidates) {

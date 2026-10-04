@@ -28,9 +28,7 @@ map = (function () {
   const SHORE_TOLERANCE = 0.5;
   // Steepness above this tends to look out of place in the game.
   const STEEPNESS_WARNING = 4;
-  // In-game meters of dry land a town's center needs before water. In game tests, towns closer than this never grew.
-  const TOWN_SITE_CLEARANCE = 40;
-  // In-game meters the nudge options may move a town to reach a safe site.
+  // In-game meters the nudge options may move a town to find a spot where its first street works.
   const TOWN_NUDGE_REACH = 200;
   const SIGN_GLYPHS = {warning: '\u26a0\ufe0e', info: '\u24d8'};
   // The game has one water level, so a lake's level drowns all lower land. Auto mode skips levels drowning more than this share of the map.
@@ -179,7 +177,6 @@ map = (function () {
     
     exportFolder = gui.addFolder('heightmap export');
     gui.mapSize = 'Gigantomaniac (TF3)';
-    gui.climate = CLIMATES[0];
     gui.ratio = RATIOS[0];
     gui.orientation = 'portrait';
     // Text fields because this dat.gui version rounds number boxes to the precision of their initial value.
@@ -192,10 +189,6 @@ map = (function () {
     gui.oceanFloor = String(GAME_MIN_HEIGHT);
     gui.bitDepth = 16;
     exportFolder.add(gui, 'mapSize', Object.keys(MAP_SIZES)).name('map size').onChange(updateExportBox);
-    climateHint = addSign(exportFolder.add(gui, 'climate', CLIMATES).name('climate').onChange(function(value) {
-      climateFollows = analysis !== null && value == suggestClimate(analysis);
-      updateHints();
-    }), 'info');
     exportFolder.add(gui, 'ratio', RATIOS).name('ratio').onChange(regionChanged);
     exportFolder.add(gui, 'orientation', ['portrait', 'landscape']).name('orientation').onChange(regionChanged);
     onEdit(exportFolder.add(gui, 'center').name('center (lat, lon)'), applyCenter);
@@ -217,6 +210,11 @@ map = (function () {
     exportFolder.open();
 
     var biomeFolder = gui.addFolder('biome export');
+    gui.climate = CLIMATES[0];
+    climateHint = addSign(biomeFolder.add(gui, 'climate', CLIMATES).name('climate').onChange(function(value) {
+      climateFollows = analysis !== null && value == suggestClimate(analysis);
+      updateHints();
+    }), 'info');
     gui.exportBiomes = function () { exportBiomeMaps(); };
     biomeFolder.add(gui, 'exportBiomes').name('export biomes');
     biomeFolder.open();
@@ -232,10 +230,11 @@ map = (function () {
     townFolder.add(gui, 'includeVillages').name('include villages');
     townFolder.add(gui, 'townNames', ['latin alphabet', 'original']).name('town names');
     townFolder.add(gui, 'townSafety', {'none': 'none', 'skip dangerous': 'skip', 'nudge-skip': 'nudge', 'nudge-force': 'force'}).name('generation safety').__li.title = [
-      'none: picks purely by population. Dangerous placements might not work in game because they sit near water or lack nearby land. They show in orange.',
+      'The game starts every town with one 88 m street through its position. If that street would be too steep or touch water, the town never grows.',
+      'none: picks purely by population. Dangerous towns show in orange.',
       'skip dangerous: skips those and takes others instead.',
-      'nudge-skip: moves an unsafe town to the nearest safe pixel within ' + TOWN_NUDGE_REACH + ' m that it can reach over land. A town in water starts from the nearest shore. If there is no such pixel, the town is skipped.',
-      'nudge-force: takes the nearest safe pixel within ' + TOWN_NUDGE_REACH + ' m in a straight line, even across water. If there is none, the town is skipped.',
+      'nudge-skip: moves a dangerous town to the nearest spot within ' + TOWN_NUDGE_REACH + ' m where its street works, without crossing water. A town in water starts from the nearest shore. If there is no such spot, the town is skipped.',
+      'nudge-force: takes the nearest spot within ' + TOWN_NUDGE_REACH + ' m where the street works, even across water. If there is none, the town is skipped.',
       'Nudged towns show in blue. Skipped towns show in red.'
     ].join('\n');
     gui.exportTowns = function () { exportTowns(); };
@@ -393,12 +392,16 @@ map = (function () {
     scheduleAnalysis();
   }
 
+  function controllers() {
+    return Object.keys(gui.__folders).reduce(function(all, name) { return all.concat(gui.__folders[name].__controllers); }, gui.__controllers);
+  }
+
   function controller(property) {
-    return gui.__controllers.concat(exportFolder.__controllers).filter(function(c) { return c.property == property; })[0];
+    return controllers().filter(function(c) { return c.property == property; })[0];
   }
 
   function refreshGUI() {
-    gui.__controllers.concat(exportFolder.__controllers).forEach(function(c) { c.updateDisplay(); });
+    controllers().forEach(function(c) { c.updateDisplay(); });
   }
 
   function fieldsEditable(properties, editable) {
@@ -1047,7 +1050,7 @@ map = (function () {
   // h: the in-game heights the water comes from, when they differ from the job's.
   // terrain: the heightmap's own heights. Without it, each town site check fetches its own tiles.
   async function buildTowns(job, report, h, terrain) {
-    var waterline = waterlineFor(job, h);
+    var levels = townLevels(job, h);
     var safety = job.towns.safety;
     var reach = safety == 'nudge' || safety == 'force' ? TOWN_NUDGE_REACH : 0;
     var result = await townExport.build(Object.assign({
@@ -1057,28 +1060,35 @@ map = (function () {
       northLeft: job.northLeft,
       onStage: report,
       reach: reach,
+      overLand: safety == 'nudge',
       keepUnsafe: safety == 'none',
-      findSite: function(px, py) {
-        return heightmapExport.townSite(job.bounds, job.out.width, job.out.height, px, py, {
-          clearance: TOWN_SITE_CLEARANCE / GAME_METERS_PER_PIXEL, reach: reach / GAME_METERS_PER_PIXEL, waterline: waterline, overLand: safety == 'nudge', terrain: terrain
-        });
+      waterline: levels.waterline,
+      heightScale: levels.k,
+      terrainPatch: function(px, py, radius) {
+        return heightmapExport.terrainPatch(job.bounds, job.out.width, job.out.height, px, py, radius,
+          {terrain: terrain, smoothing: job.smoothing / GAME_METERS_PER_PIXEL, level: levels.waterline});
       }
     }, job.towns));
-    // Yellow towns are safe, orange ones are exported but may never grow, blue ones were moved to a safe site, and red ones were skipped.
+    // Yellow: should grow. Orange: exported but may never grow. Blue: moved so it should grow. Red: skipped.
     townLayer.clearLayers().addTo(map);
     result.towns.forEach(function(t) {
-      var color = t.from ? '#3399ff' : t.unsafe ? '#ff8c00' : '#ffcc00';
+      var color = t.from ? '#3399ff' : t.problems.length ? '#ff8c00' : '#ffcc00';
       if (t.from) L.polyline([[t.from.lat, t.from.lng], [t.lat, t.lng]], {color: color, weight: 1, dashArray: '3 3'}).addTo(townLayer);
       L.circleMarker([t.lat, t.lng], {radius: 4, color: color, weight: 2, fillOpacity: 0.8})
-        .bindTooltip(t.name + ', size ' + t.size + (t.from ? ', moved ' + Math.round(t.moved) + ' m' : t.unsafe ? ', within ' + TOWN_SITE_CLEARANCE + ' m of water' : ''))
+        .bindTooltip(t.name + ', size ' + t.size + (t.from ? ', moved ' + Math.round(t.moved) + ' m because its first street was ' + streetProblems(t) :
+          t.problems.length ? ', may never grow, first street ' + streetProblems(t) : ''))
         .addTo(townLayer);
     });
     result.skipped.forEach(function(t) {
       L.circleMarker([t.lat, t.lng], {radius: 4, color: '#ff3030', weight: 2, fillOpacity: 0.8})
-        .bindTooltip(t.name + ', skipped, ' + (reach ? 'no safe site within ' + reach + ' m' : 'within ' + TOWN_SITE_CLEARANCE + ' m of water'))
+        .bindTooltip(t.name + ', skipped, ' + (reach ? 'no working spot within ' + reach + ' m' : 'first street ' + streetProblems(t)))
         .addTo(townLayer);
     });
     return result;
+  }
+
+  function streetProblems(town) {
+    return town.problems.join(' and ');
   }
 
   function townSummary(result, job) {
@@ -1088,23 +1098,24 @@ map = (function () {
       names.slice(0, 10).join(', ') + (names.length > 10 ? ', ...' : '')
     ];
     var list = function(towns, label) {
-      return towns.slice(0, 10).map(label || function(t) { return t.name; }).join(', ') + (towns.length > 10 ? ', ...' : '');
+      return towns.slice(0, 10).map(label).join(', ') + (towns.length > 10 ? ', ...' : '');
     };
+    var withProblems = function(t) { return t.name + ' (' + streetProblems(t) + ')'; };
     var nudged = result.towns.filter(function(t) { return t.from; });
-    var risky = result.towns.filter(function(t) { return t.unsafe && !t.from; });
+    var risky = result.towns.filter(function(t) { return t.problems.length && !t.from; });
     if (nudged.length) lines.push('nudged: ' + list(nudged, function(t) { return t.name + ' ' + Math.round(t.moved) + ' m'; }));
     if (result.skipped.length) {
       var nudging = job.towns.safety == 'nudge' || job.towns.safety == 'force';
-      lines.push((nudging ? 'skipped, no safe site within ' + TOWN_NUDGE_REACH + ' m: ' : 'skipped within ' + TOWN_SITE_CLEARANCE + ' m of water: ') + list(result.skipped));
+      lines.push((nudging ? 'skipped, no working spot within ' + TOWN_NUDGE_REACH + ' m: ' : 'skipped, first street fails: ') + list(result.skipped, withProblems));
     }
-    if (risky.length) lines.push('may never grow, within ' + TOWN_SITE_CLEARANCE + ' m of water: ' + list(risky));
+    if (risky.length) lines.push('may never grow, first street fails: ' + list(risky, withProblems));
     return lines;
   }
 
-  // Real meters at or below which the export makes water. Auto mode takes it from the analysis, since the fields only hold the in-game level.
-  function waterlineFor(job, h) {
+  // The height scale, and the real meters at or below which the export makes water. Auto mode takes them from the analysis, since the fields only hold the in-game level.
+  function townLevels(job, h) {
     h = h || (job.auto && job.analysis ? heightsFor(job.analysis, job.heights.k, job.oceans, fixedMax(job.request)) : job.heights);
-    return h.waterline !== undefined ? h.waterline : h.water / h.k;
+    return {k: h.k, waterline: h.waterline !== undefined ? h.waterline : h.water / h.k};
   }
 
   function exportRegion() {

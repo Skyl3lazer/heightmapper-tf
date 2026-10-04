@@ -592,8 +592,13 @@ var heightmapExport = (function () {
 
   // A Gaussian-like blur of the land, sigma in pixels, from three box passes over normalized sums.
   // Water at or below level is left out entirely, so no shoreline moves.
+  // Half-width of each of smoothLand's three box passes.
+  function boxRadius(sigma) {
+    return Math.round((Math.sqrt(4 * sigma * sigma + 1) - 1) / 2);
+  }
+
   function smoothLand(heights, width, height, sigma, level) {
-    const r = Math.round((Math.sqrt(4 * sigma * sigma + 1) - 1) / 2);
+    const r = boxRadius(sigma);
     if (r < 1) return;
     const sum = new Float32Array(heights.length), weight = new Float32Array(heights.length);
     for (let i = 0; i < heights.length; i++) {
@@ -947,69 +952,32 @@ var heightmapExport = (function () {
     return labels.map(l => l && !edge[l] ? 1 : 0);
   }
 
-  // The output pixel {px, py} nearest (px, py), at most reach pixels away, with nothing at or below waterline within clearance pixels, or null.
-  // overLand: the site must connect to (px, py) over land within reach, starting from the nearest shore when (px, py) is in water.
-  // terrain: the heights render returned for this output, read instead of fetching the patch.
-  async function townSite(bounds, width, height, px, py, options) {
-    const {clearance, reach, waterline, overLand, terrain} = options;
-    const radius = reach + clearance, size = 2 * radius + 1;
-    let heights;
+  // Heights in meters for the output pixels within radius of (px, py), north up, a square 2 radius + 1 wide.
+  // terrain: the heights render returned for this output, read instead of fetching. smoothing and level: as for render.
+  async function terrainPatch(bounds, width, height, px, py, radius, options) {
+    const {terrain, smoothing, level} = options;
+    const size = 2 * radius + 1;
     if (terrain) {
-      heights = new Float32Array(size * size);
+      const heights = new Float32Array(size * size);
       for (let j = 0; j < size; j++) {
         const y = Math.min(height - 1, Math.max(0, py - radius + j));
         for (let i = 0; i < size; i++) heights[j * size + i] = terrain[y * width + Math.min(width - 1, Math.max(0, px - radius + i))];
       }
-    } else {
-      const region = boundsToRegion(bounds);
-      const dx = (region.x1 - region.x0) / (width - 1), dy = (region.y1 - region.y0) / (height - 1);
-      const patch = {x0: region.x0 + (px - radius) * dx, x1: region.x0 + (px + radius) * dx, y0: region.y0 + (py - radius) * dy, y1: region.y0 + (py + radius) * dy};
-      // Sampled exactly as render samples the map, so the water here is the water in the heightmap.
-      heights = await sampleRegion(patch, size, size, pickZoom(region.x1 - region.x0, width, 2), function () {});
+      return heights;
     }
-    const wet = Uint8Array.from(heights, v => v <= waterline ? 1 : 0);
-    const unsafe = new Uint8Array(size * size);
-    for (let j = 0; j < size; j++) {
-      for (let i = 0; i < size; i++) {
-        if (!wet[j * size + i]) continue;
-        for (let v = Math.max(0, j - clearance); v <= Math.min(size - 1, j + clearance); v++) {
-          const w = Math.floor(Math.sqrt(clearance * clearance - (v - j) ** 2));
-          unsafe.fill(1, v * size + Math.max(0, i - w), v * size + Math.min(size - 1, i + w) + 1);
-        }
-      }
-    }
-    const distance2 = k => (k % size - radius) ** 2 + (Math.floor(k / size) - radius) ** 2;
-    const inReach = k => distance2(k) <= reach * reach;
-
-    let reached = null;
-    if (overLand) {
-      const queue = [];
-      let nearest = Infinity;
-      for (let k = 0; k < size * size; k++) {
-        if (wet[k] || !inReach(k) || distance2(k) > nearest) continue;
-        if (distance2(k) < nearest) queue.length = 0;
-        nearest = distance2(k);
-        queue.push(k);
-      }
-      reached = new Uint8Array(size * size);
-      queue.forEach(k => { reached[k] = 1; });
-      // Four neighbors, so land touching only at a corner doesn't count as connected across the water between.
-      for (let n = 0; n < queue.length; n++) {
-        const k = queue[n], i = k % size;
-        for (const q of [i > 0 ? k - 1 : -1, i < size - 1 ? k + 1 : -1, k - size, k + size]) {
-          if (q >= 0 && q < size * size && !wet[q] && !reached[q] && inReach(q)) {
-            reached[q] = 1;
-            queue.push(q);
-          }
-        }
-      }
-    }
-
-    let best = -1;
-    for (let k = 0; k < size * size; k++) {
-      if (!unsafe[k] && inReach(k) && (!reached || reached[k]) && (best < 0 || distance2(k) < distance2(best))) best = k;
-    }
-    return best < 0 ? null : {px: px + best % size - radius, py: py + Math.floor(best / size) - radius};
+    // The blur reaches this far, so a margin this wide makes the smoothed patch match the smoothed map.
+    const pad = smoothing ? 3 * boxRadius(smoothing) : 0;
+    const full = size + 2 * pad, reach = radius + pad;
+    const region = boundsToRegion(bounds);
+    const dx = (region.x1 - region.x0) / (width - 1), dy = (region.y1 - region.y0) / (height - 1);
+    const patch = {x0: region.x0 + (px - reach) * dx, x1: region.x0 + (px + reach) * dx, y0: region.y0 + (py - reach) * dy, y1: region.y0 + (py + reach) * dy};
+    // Sampled exactly as render samples the map, so this is the terrain in the heightmap.
+    const heights = await sampleRegion(patch, full, full, pickZoom(region.x1 - region.x0, width, 2), function () {});
+    if (!pad) return heights;
+    smoothLand(heights, full, full, smoothing, level);
+    const out = new Float32Array(size * size);
+    for (let j = 0; j < size; j++) out.set(heights.subarray((j + pad) * full + pad, (j + pad) * full + pad + size), j * size);
+    return out;
   }
 
   // Coarse pass for live feedback: extremes and water surfaces, without fetching full-resolution tiles.
@@ -1115,7 +1083,7 @@ var heightmapExport = (function () {
     analyze: analyze,
     render: render,
     renderBiomes: renderBiomes,
-    townSite: townSite,
+    terrainPatch: terrainPatch,
     zip: makeZip
   };
 }());
