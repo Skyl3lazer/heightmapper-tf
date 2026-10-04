@@ -11,19 +11,30 @@ var overpass = (function () {
     'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
     'https://overpass-api.de/api/interpreter'
   ].filter(Boolean);
-  const TIMEOUT_MS = 60000;
-  const HEDGE_MS = 20000;
+  const TIMEOUT_MS = 90000;
+  const HEDGE_MS = 30000;
 
   function configuredUrl() {
     const config = typeof heightmapperConfig === 'undefined' ? {} : heightmapperConfig;
     return (config.overpassUrl || '').replace('{key}', encodeURIComponent(config.overpassKey || ''));
   }
 
+  // Overpass only takes longitudes from -180 to 180, so a box crossing the antimeridian splits into one box each side.
+  function bboxes(bounds) {
+    const {south, north} = bounds;
+    const shift = 360 * Math.round((bounds.west + bounds.east) / 2 / 360);
+    const west = bounds.west - shift, east = bounds.east - shift;
+    if (east - west >= 360) return [[south, -180, north, 180]];
+    if (west < -180) return [[south, west + 360, north, 180], [south, -180, north, east]];
+    if (east > 180) return [[south, west, north, 180], [south, -180, north, east - 360]];
+    return [[south, west, north, east]];
+  }
+
   // The nodes inside bounds matching an Overpass tag filter such as ["natural"="volcano"].
   // A down or overloaded instance shouldn't stall the export, so the next one starts after a short wait or a failure.
   function nodes(bounds, filter) {
-    const body = new URLSearchParams({data: `[out:json][timeout:60];node${filter}` +
-      `(${bounds.south},${bounds.west},${bounds.north},${bounds.east});out;`});
+    const parts = bboxes(bounds).map(b => `node${filter}(${b.join(',')});`).join('');
+    const body = new URLSearchParams({data: `[out:json][timeout:90];(${parts});out qt;`});
     const done = new AbortController();
     const errors = [];
     let next = 0, running = 0;
@@ -39,6 +50,8 @@ var overpass = (function () {
             return response.json();
           })
           .then(json => {
+            // Overpass reports a timeout or memory limit as an ordinary reply with no elements and an error remark.
+            if (/error/i.test(json.remark || '')) throw new Error(json.remark.trim());
             done.abort();
             resolve(json.elements);
           })

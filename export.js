@@ -174,7 +174,8 @@ var heightmapExport = (function () {
     const stripWidth = columns * TILE_SIZE;
     const strip = new Float32Array(stripWidth * TILE_SIZE);
     const tiles = [];
-    for (let tx = tx0; tx <= tx1; tx++) tiles.push(fetchTile(z, tx, ty));
+    // Columns past the antimeridian come from the other side of the world.
+    for (let tx = tx0; tx <= tx1; tx++) tiles.push(fetchTile(z, ((tx % 2 ** z) + 2 ** z) % 2 ** z, ty));
     (await Promise.all(tiles)).forEach((tile, c) => {
       for (let row = 0; row < TILE_SIZE; row++) {
         strip.set(tile.subarray(row * TILE_SIZE, (row + 1) * TILE_SIZE), row * stripWidth + c * TILE_SIZE);
@@ -188,14 +189,15 @@ var heightmapExport = (function () {
 
   // Source pixels and tent-filter weights for each output sample, as flat arrays indexed through offsets.
   // The tent spans one output pixel each way and at least one source pixel, which makes it bilinear when upsampling.
-  function footprints(start, end, count, scale) {
+  // wrap: the axis carries on past its edges, as longitude does around the world.
+  function footprints(start, end, count, scale, wrap) {
     const radius = Math.max((end - start) * scale / (count - 1), 1);
     const offsets = new Int32Array(count + 1);
     const index = [], weight = [];
     for (let i = 0; i < count; i++) {
       const center = (start + i / (count - 1) * (end - start)) * scale;
-      const first = Math.max(0, Math.ceil(center - radius - 0.5));
-      const last = Math.min(scale - 1, Math.floor(center + radius - 0.5));
+      const first = wrap ? Math.ceil(center - radius - 0.5) : Math.max(0, Math.ceil(center - radius - 0.5));
+      const last = wrap ? Math.floor(center + radius - 0.5) : Math.min(scale - 1, Math.floor(center + radius - 0.5));
       const from = index.length;
       let total = 0;
       for (let k = first; k <= last; k++) {
@@ -216,7 +218,7 @@ var heightmapExport = (function () {
   // Samples sit on a grid whose first and last pixels are on the region edges, streamed one tile row at a time.
   async function sampleRegion(region, width, height, zoom, onProgress) {
     const scale = TILE_SIZE * 2 ** zoom;
-    const cols = footprints(region.x0, region.x1, width, scale);
+    const cols = footprints(region.x0, region.x1, width, scale, true);
     const rows = footprints(region.y0, region.y1, height, scale);
     const tx0 = Math.floor(cols.index[0] / TILE_SIZE);
     const tx1 = Math.floor(cols.index[cols.index.length - 1] / TILE_SIZE);
@@ -495,14 +497,33 @@ var heightmapExport = (function () {
   }
 
   // ArcGIS image services return raw pixels on exactly our grid when asked for band-sequential Web Mercator output.
+  // ArcGIS image services return no data past the antimeridian, so a box crossing it is fetched in pieces, each shifted back into the world.
   async function fetchImageServer(url, region, width, height, pixelType, interpolation) {
+    const out = new (pixelType === 'F32' ? Float32Array : Uint8Array)(width * height);
+    const cell = (region.x1 - region.x0) / (width - 1);
+    for (let c = 0; c < width;) {
+      const world = Math.floor(region.x0 + c * cell);
+      let end = c;
+      while (end + 1 < width && Math.floor(region.x0 + (end + 1) * cell) === world) end++;
+      const columns = end - c + 1;
+      const piece = await fetchImagePiece(url, region.x0 + c * cell - world, columns, cell, region, height, pixelType, interpolation);
+      for (let r = 0; r < height; r++) out.set(piece.subarray(r * columns, (r + 1) * columns), r * width + c);
+      c = end + 1;
+    }
+    return out;
+  }
+
+  // Columns from normalized x0, cell apart, all inside one copy of the world.
+  async function fetchImagePiece(url, x0, width, cell, region, height, pixelType, interpolation) {
     const span = 2 * Math.PI * 6378137;
-    const dx = (region.x1 - region.x0) * span / (width - 1), dy = (region.y1 - region.y0) * span / (height - 1);
-    const west = (region.x0 - 0.5) * span - dx / 2, east = (region.x1 - 0.5) * span + dx / 2;
+    const dx = cell * span, dy = (region.y1 - region.y0) * span / (height - 1);
+    const west = (x0 - 0.5) * span - dx / 2, east = (x0 + (width - 1) * cell - 0.5) * span + dx / 2;
     const south = (0.5 - region.y1) * span - dy / 2, north = (0.5 - region.y0) * span + dy / 2;
     const params = new URLSearchParams({
       bbox: [west, south, east, north].join(','), bboxSR: 3857, imageSR: 3857, size: width + ',' + height,
-      format: 'bsq', pixelType: pixelType, interpolation: interpolation, f: 'image'
+      format: 'bsq', pixelType: pixelType, interpolation: interpolation, f: 'image',
+      // Marks missing depths as impossible values instead of 0, which would read as sea level.
+      noData: pixelType === 'F32' ? PLAUSIBLE_MIN * 10 : 0
     });
     const response = await fetch(url + '?' + params, {signal: AbortSignal.timeout(120000)});
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -518,6 +539,26 @@ var heightmapExport = (function () {
   }
 
   // Everything at or below level (meters) is under water in game, so it takes NOAA's depth, never rising above the level.
+  // NOAA has no data within a few kilometers of the antimeridian, so those pixels take the nearest depth in their row.
+  function fillGaps(grid, width, height, reach) {
+    for (let r = 0; r < height; r++) {
+      const row = r * width;
+      for (let c = 0; c < width; c++) {
+        if (plausible(grid[row + c])) continue;
+        for (let d = 1; d <= reach; d++) {
+          if (c - d >= 0 && plausible(grid[row + c - d])) {
+            grid[row + c] = grid[row + c - d];
+            break;
+          }
+          if (c + d < width && plausible(grid[row + c + d])) {
+            grid[row + c] = grid[row + c + d];
+            break;
+          }
+        }
+      }
+    }
+  }
+
   // Cells at or below submerge.level take NOAA depths, and every one ends at or below submerge.top so it sits under the water.
   async function applyBathymetry(heights, width, height, region, submerge) {
     const {level, top} = submerge;
@@ -526,6 +567,7 @@ var heightmapExport = (function () {
     let depth = null, note = 'NOAA water depths applied';
     try {
       depth = await fetchImageServer(BATHYMETRY_URL, region, bw, bh, 'F32', 'RSP_BilinearInterpolation');
+      fillGaps(depth, bw, bh, 8);
     } catch (e) {
       note = 'NOAA water depths unavailable (' + e.message + ')';
     }
@@ -767,11 +809,14 @@ var heightmapExport = (function () {
         }
       }
     }
+    const centerLng = xToLng((region.x0 + region.x1) / 2);
     volcanoes.forEach((v, n) => {
       const id = n + 1;
+      // OpenStreetMap longitudes stay within -180 to 180, so they move to the copy of the world the box is in.
+      const lon = v.lon + 360 * Math.round((centerLng - v.lon) / 360);
       // Growth starts at the highest land near the point, since OpenStreetMap points often sit on a flank or the crater floor.
       let top = -1;
-      within((lngToX(v.lon) - region.x0) / (region.x1 - region.x0) * (width - 1),
+      within((lngToX(lon) - region.x0) / (region.x1 - region.x0) * (width - 1),
         (latToY(v.lat) - region.y0) / (region.y1 - region.y0) * (height - 1),
         SUMMIT_SEARCH_RADIUS / spacing, i => { if (top < 0 || heights[i] > heights[top]) top = i; });
       if (top < 0) return;

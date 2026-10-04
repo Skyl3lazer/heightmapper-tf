@@ -9,6 +9,8 @@ var townExport = (function () {
   const EDGE_MARGIN = 800;
   const SIZE_RANGE = [0.55, 2.6];
   const DEFAULT_POPULATION = {city: 50000, town: 10000, village: 1000};
+  // Largest place types first. Overpass can't rank by population, so smaller types are fetched only while the larger ones leave the map short of towns.
+  const PLACE_TIERS = [['city', 'cities'], ['town', 'towns'], ['village', 'villages']];
   const COMMERCIAL_NEEDS = ['vegetables', 'fish', 'meat'];
   const INDUSTRIAL_NEEDS = ['bricks', 'planks', 'fuel'];
 
@@ -59,29 +61,35 @@ var townExport = (function () {
 
   async function build(options) {
     const {bounds, width, height, maxTowns, minSpacing, includeVillages, northLeft} = options;
-    const types = includeVillages ? 'city|town|village' : 'city|town';
-    const places = await overpass.nodes(bounds, `["place"~"^(${types})$"]`);
+    const onStage = options.onStage || function () {};
     const nw = heightmapExport.project(bounds.north, bounds.west);
     const se = heightmapExport.project(bounds.south, bounds.east);
     const halfX = (width - 1) / 2 * GAME_METERS_PER_PIXEL;
     const halfY = (height - 1) / 2 * GAME_METERS_PER_PIXEL;
 
+    const centerLng = (bounds.west + bounds.east) / 2;
     const candidates = [];
-    for (const place of places) {
-      const name = asciiName(place.tags);
-      if (!name) continue;
-      const p = heightmapExport.project(place.lat, place.lon);
-      const x = snap(((p.x - nw.x) / (se.x - nw.x) - 0.5) * 2 * halfX);
-      const y = snap((0.5 - (p.y - nw.y) / (se.y - nw.y)) * 2 * halfY);
-      if (Math.abs(x) > halfX - EDGE_MARGIN || Math.abs(y) > halfY - EDGE_MARGIN) continue;
-      candidates.push({name: name, x: northLeft ? -y : x, y: northLeft ? x : y, lat: place.lat, lng: place.lon, population: population(place.tags)});
-    }
-    candidates.sort((a, b) => b.population - a.population);
-
-    const towns = [];
-    for (const c of candidates) {
+    let towns = [];
+    for (const [tag, plural] of includeVillages ? PLACE_TIERS : PLACE_TIERS.slice(0, 2)) {
+      onStage('Looking up ' + plural + '...');
+      for (const place of await overpass.nodes(bounds, `["place"="${tag}"]`)) {
+        const name = asciiName(place.tags);
+        if (!name) continue;
+        // OpenStreetMap longitudes stay within -180 to 180, so they move to the copy of the world the box is in.
+        const lon = place.lon + 360 * Math.round((centerLng - place.lon) / 360);
+        const p = heightmapExport.project(place.lat, lon);
+        const x = snap(((p.x - nw.x) / (se.x - nw.x) - 0.5) * 2 * halfX);
+        const y = snap((0.5 - (p.y - nw.y) / (se.y - nw.y)) * 2 * halfY);
+        if (Math.abs(x) > halfX - EDGE_MARGIN || Math.abs(y) > halfY - EDGE_MARGIN) continue;
+        candidates.push({name: name, x: northLeft ? -y : x, y: northLeft ? x : y, lat: place.lat, lng: lon, population: population(place.tags)});
+      }
+      candidates.sort((a, b) => b.population - a.population);
+      towns = [];
+      for (const c of candidates) {
+        if (towns.length >= maxTowns) break;
+        if (towns.every(t => Math.hypot(t.x - c.x, t.y - c.y) >= minSpacing)) towns.push(c);
+      }
       if (towns.length >= maxTowns) break;
-      if (towns.every(t => Math.hypot(t.x - c.x, t.y - c.y) >= minSpacing)) towns.push(c);
     }
 
     const logs = towns.map(t => Math.log(t.population));

@@ -919,12 +919,18 @@ map = (function () {
   }
 
   // h: the in-game heights the water level comes from, when they differ from the job's.
-  async function buildBiomes(job, report, h) {
+  // lenient: an OpenStreetMap outage leaves the volcano mask empty instead of failing.
+  async function buildBiomes(job, report, h, lenient) {
     h = h || job.heights;
-    var volcanoes = [];
+    var volcanoes = [], volcanoError = null;
     if (job.climate == 'Tropical') {
       report('Looking up volcanoes...');
-      volcanoes = await overpass.nodes(job.bounds, '["natural"="volcano"]');
+      try {
+        volcanoes = await overpass.nodes(job.bounds, '["natural"="volcano"]');
+      } catch (e) {
+        if (!lenient) throw e;
+        volcanoError = e.message;
+      }
     }
     var result = await heightmapExport.renderBiomes({
       bounds: job.bounds,
@@ -937,6 +943,7 @@ map = (function () {
       onStage: report
     });
     result.volcanoCount = volcanoes.length;
+    result.volcanoError = volcanoError;
     return result;
   }
 
@@ -944,7 +951,8 @@ map = (function () {
     return [
       'biomes 0-4: ' + result.biomeShares.map(function(v) { return (v * 100).toFixed(1) + '%'; }).join(', '),
       result.layers.map(function(l) {
-        var source = l.key == 'volcano' ? ' from ' + result.volcanoCount + ' OpenStreetMap volcanoes' : '';
+        var source = l.key != 'volcano' ? '' : result.volcanoError ? ', left empty because ' + result.volcanoError :
+          ' from ' + result.volcanoCount + ' OpenStreetMap volcanoes';
         return l.key + ' ' + (l.share * 100).toFixed(1) + '%' + source;
       }).join(', ')
     ];
@@ -957,12 +965,12 @@ map = (function () {
   }
 
   async function buildTowns(job, report) {
-    report('Looking up towns...');
     var result = await townExport.build(Object.assign({
       bounds: job.bounds,
       width: job.out.width,
       height: job.out.height,
-      northLeft: job.northLeft
+      northLeft: job.northLeft,
+      onStage: report
     }, job.towns));
     townLayer.clearLayers().addTo(map);
     result.towns.forEach(function(t) {
@@ -1019,19 +1027,23 @@ map = (function () {
         };
       }
       var heightmap = await buildHeightmap(job, step(1, 'heightmap'));
-      var biomes = await buildBiomes(job, step(2, 'biomes'), heightmap.heights);
-      var towns = await buildTowns(job, step(3, 'towns'));
-      report('Writing ' + job.name + '.zip...');
-      var zip = await heightmapExport.zip([
-        {path: 'heightmaps/' + job.name + '.png', blob: heightmap.blob}
-      ].concat(biomeFiles(biomes, job.name).map(function(f) {
+      var biomes = await buildBiomes(job, step(2, 'biomes'), heightmap.heights, true);
+      // An OpenStreetMap outage shouldn't sink the whole export, so the zip goes out without towns and its name says so.
+      var towns = null, townError = null;
+      try {
+        towns = await buildTowns(job, step(3, 'towns'));
+      } catch (e) {
+        townError = e.message;
+      }
+      var zipName = job.name + (towns ? '' : '_NO_TOWNS') + '.zip';
+      report('Writing ' + zipName + '...');
+      var files = [{path: 'heightmaps/' + job.name + '.png', blob: heightmap.blob}].concat(biomeFiles(biomes, job.name).map(function(f) {
         return {path: 'biomes/' + f.path, blob: f.blob};
-      }), [
-        {path: 'towns_industries/' + job.name + '.lua', blob: new Blob([towns.lua], {type: 'text/plain'})}
-      ]));
-      saveAs(zip, job.name + '.zip');
-      return ['Saved ' + job.name + '.zip for ' + job.climate + '. Extract it into the Transport Fever 3 user folder, %APPDATA%\\Transport Fever 3.']
-        .concat(heightmapSummary(heightmap, job).slice(0, 4), biomeSummary(biomes), townSummary(towns));
+      }));
+      if (towns) files.push({path: 'towns_industries/' + job.name + '.lua', blob: new Blob([towns.lua], {type: 'text/plain'})});
+      saveAs(await heightmapExport.zip(files), zipName);
+      return ['Saved ' + zipName + ' for ' + job.climate + '. Extract it into the Transport Fever 3 user folder, %APPDATA%\\Transport Fever 3.']
+        .concat(heightmapSummary(heightmap, job).slice(0, 4), biomeSummary(biomes), towns ? townSummary(towns) : ['towns left out because ' + townError]);
     }, true);
   }
 
