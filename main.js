@@ -143,12 +143,12 @@ map = (function () {
     gui.maxHeight = '';
     gui.minHeight = '';
     gui.waterLevel = '';
-    gui.add(gui, 'maxHeight').name('maximum height').onFinishChange(function(value) {
+    onEdit(gui.add(gui, 'maxHeight').name('maximum height'), function(value) {
       if (gui.scaleMode == 'max height') scaleChanged(value);
       else applyManualHeights();
     });
-    gui.add(gui, 'minHeight').name('minimum height').onFinishChange(applyManualHeights);
-    waterHint = addSign(gui.add(gui, 'waterLevel').name('water level').onFinishChange(applyManualHeights), 'info');
+    onEdit(gui.add(gui, 'minHeight').name('minimum height'), applyManualHeights);
+    waterHint = addSign(onEdit(gui.add(gui, 'waterLevel').name('water level'), applyManualHeights), 'info');
 
     gui.autoexpose = true;
     gui.add(gui, 'autoexpose').name("auto-exposure").onChange(function(value) {
@@ -194,18 +194,18 @@ map = (function () {
     }), 'info');
     exportFolder.add(gui, 'ratio', RATIOS).name('ratio').onChange(regionChanged);
     exportFolder.add(gui, 'orientation', ['portrait', 'landscape']).name('orientation').onChange(regionChanged);
-    exportFolder.add(gui, 'center').name('center (lat, lon)').onFinishChange(applyCenter);
-    exportFolder.add(gui, 'metersPerPixel').name('real meters per pixel').onFinishChange(applyScale);
+    onEdit(exportFolder.add(gui, 'center').name('center (lat, lon)'), applyCenter);
+    onEdit(exportFolder.add(gui, 'metersPerPixel').name('real meters per pixel'), applyScale);
     exportFolder.add(gui, 'scaleMode', ['height scale', 'steepness', 'max height']).name('scale by').onChange(function(mode) {
       requestedText = {'height scale': gui.heightScale, 'steepness': gui.steepness, 'max height': gui.maxHeight}[mode];
       updateEditable();
     });
-    var heightScaleRow = exportFolder.add(gui, 'heightScale').name('height scale').onFinishChange(scaleChanged);
+    var heightScaleRow = onEdit(exportFolder.add(gui, 'heightScale').name('height scale'), scaleChanged);
     heightScaleHint = addSign(heightScaleRow, 'info');
-    var steepnessRow = exportFolder.add(gui, 'steepness').name('steepness (x real)').onFinishChange(scaleChanged);
+    var steepnessRow = onEdit(exportFolder.add(gui, 'steepness').name('steepness (x real)'), scaleChanged);
     steepnessWarning = addSign(steepnessRow, 'warning');
     exportFolder.add(gui, 'smoothing', 0, 100).step(2).name('smoothing (m)').onFinishChange(runAnalysis);
-    exportFolder.add(gui, 'oceanFloor').name('ocean floor (m)').onFinishChange(runAnalysis);
+    onEdit(exportFolder.add(gui, 'oceanFloor').name('ocean floor (m)'), runAnalysis);
     bitDepthHint = addSign(exportFolder.add(gui, 'bitDepth', [16, 8]).name('bit depth').onChange(updateHints), 'info');
     // dat.gui only recognizes plain functions as buttons, not async ones.
     gui.exportHeightmap = function () { exportRegion(); };
@@ -410,6 +410,20 @@ map = (function () {
     showSign(heightScaleHint, lowered ? "Height scale has been modified to keep the max height below the game's limit" : null);
     controller('heightScale').updateDisplay();
     controller('steepness').updateDisplay();
+  }
+
+  // dat.gui reports a finished edit whenever a text field loses focus, so the handler only runs when the text changed.
+  // Otherwise clicking through a field that shows a fitted value would make that value the request.
+  function onEdit(controller, handler) {
+    var input = controller.domElement.querySelector('input');
+    var before = input.value;
+    input.addEventListener('focus', function() {
+      before = input.value;
+    });
+    return controller.onFinishChange(function(value) {
+      if (input.value !== before) handler(value);
+      before = input.value;
+    });
   }
 
   // A caution or information sign after a field's name, hidden until shown.
