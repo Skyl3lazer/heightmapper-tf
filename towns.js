@@ -74,7 +74,8 @@ var townExport = (function () {
   }
 
   async function build(options) {
-    const {bounds, width, height, maxTowns, minSpacing, includeVillages, originalNames, northLeft} = options;
+    // waterNear(px, py): resolves true when the site at that output pixel is too close to water. skipDangerous leaves those towns out.
+    const {bounds, width, height, maxTowns, minSpacing, includeVillages, originalNames, northLeft, waterNear, skipDangerous} = options;
     const onStage = options.onStage || function () {};
     const nw = heightmapExport.project(bounds.north, bounds.west);
     const se = heightmapExport.project(bounds.south, bounds.east);
@@ -95,13 +96,18 @@ var townExport = (function () {
         const x = snap(((p.x - nw.x) / (se.x - nw.x) - 0.5) * 2 * halfX);
         const y = snap((0.5 - (p.y - nw.y) / (se.y - nw.y)) * 2 * halfY);
         if (Math.abs(x) > halfX - EDGE_MARGIN || Math.abs(y) > halfY - EDGE_MARGIN) continue;
-        candidates.push({name: name, x: northLeft ? -y : x, y: northLeft ? x : y, lat: place.lat, lng: lon, population: population(place.tags)});
+        candidates.push({name: name, x: northLeft ? -y : x, y: northLeft ? x : y, lat: place.lat, lng: lon, population: population(place.tags),
+          px: Math.round(x / GAME_METERS_PER_PIXEL + (width - 1) / 2), py: Math.round((height - 1) / 2 - y / GAME_METERS_PER_PIXEL)});
       }
       candidates.sort((a, b) => b.population - a.population);
+      if (waterNear) onStage('Checking town sites...');
       towns = [];
       for (const c of candidates) {
         if (towns.length >= maxTowns) break;
-        if (towns.every(t => Math.hypot(t.x - c.x, t.y - c.y) >= minSpacing)) towns.push(c);
+        if (!towns.every(t => Math.hypot(t.x - c.x, t.y - c.y) >= minSpacing)) continue;
+        // Only towns that would otherwise be picked get checked, and each only once across the tiers.
+        if (waterNear && c.wet === undefined) c.wet = await waterNear(c.px, c.py);
+        if (!(skipDangerous && c.wet)) towns.push(c);
       }
       if (towns.length >= maxTowns) break;
     }
@@ -116,7 +122,7 @@ var townExport = (function () {
       t.industrial = INDUSTRIAL_NEEDS[Math.floor(h / 3) % 3];
     });
 
-    return {lua: toLua(towns), towns: towns, candidates: candidates.length};
+    return {lua: toLua(towns), towns: towns, candidates: candidates.length, skipped: skipDangerous ? candidates.filter(c => c.wet) : []};
   }
 
   return {build: build};

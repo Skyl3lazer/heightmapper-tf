@@ -947,6 +947,21 @@ var heightmapExport = (function () {
     return labels.map(l => l && !edge[l] ? 1 : 0);
   }
 
+  // Whether any output pixel within radius of (px, py) is at or below waterline, sampled exactly as render samples the map.
+  async function waterNear(bounds, width, height, px, py, radius, waterline) {
+    const region = boundsToRegion(bounds);
+    const dx = (region.x1 - region.x0) / (width - 1), dy = (region.y1 - region.y0) / (height - 1);
+    const patch = {x0: region.x0 + (px - radius) * dx, x1: region.x0 + (px + radius) * dx, y0: region.y0 + (py - radius) * dy, y1: region.y0 + (py + radius) * dy};
+    const size = 2 * radius + 1;
+    const heights = await sampleRegion(patch, size, size, pickZoom(region.x1 - region.x0, width, 2), function () {});
+    for (let j = 0; j < size; j++) {
+      for (let i = 0; i < size; i++) {
+        if ((i - radius) ** 2 + (j - radius) ** 2 <= radius * radius && heights[j * size + i] <= waterline) return true;
+      }
+    }
+    return false;
+  }
+
   // Coarse pass for live feedback: extremes and water surfaces, without fetching full-resolution tiles.
   // limits(peak): given the highest point in meters, the {floor, ceiling} in meters that heights are clamped into.
   // submerge(water, floodShare, areaKm2): given the water surfaces found, the {level, top} in meters for applyBathymetry, or null.
@@ -1047,6 +1062,7 @@ var heightmapExport = (function () {
     analyze: analyze,
     render: render,
     renderBiomes: renderBiomes,
+    waterNear: waterNear,
     zip: makeZip
   };
 }());

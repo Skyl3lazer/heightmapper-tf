@@ -28,6 +28,8 @@ map = (function () {
   const SHORE_TOLERANCE = 0.5;
   // Steepness above this tends to look out of place in the game.
   const STEEPNESS_WARNING = 4;
+  // In-game meters of dry land a town's center needs before water. In game tests, towns closer than this never grew.
+  const TOWN_SITE_CLEARANCE = 40;
   const SIGN_GLYPHS = {warning: '\u26a0\ufe0e', info: '\u24d8'};
   // The game has one water level, so a lake's level drowns all lower land. Auto mode skips levels drowning more than this share of the map.
   const MAX_FLOOD_SHARE = 0.15;
@@ -222,10 +224,12 @@ map = (function () {
     gui.townSpacing = 1200;
     gui.includeVillages = true;
     gui.townNames = 'latin alphabet';
+    gui.townSafety = 'none';
     townFolder.add(gui, 'maxTowns', 1, 300).step(1).name('max towns');
     townFolder.add(gui, 'townSpacing', 0, 5000).step(50).name('min town spacing (m)');
     townFolder.add(gui, 'includeVillages').name('include villages');
     townFolder.add(gui, 'townNames', ['latin alphabet', 'original']).name('town names');
+    townFolder.add(gui, 'townSafety', ['none', 'skip dangerous']).name('generation safety');
     gui.exportTowns = function () { exportTowns(); };
     townFolder.add(gui, 'exportTowns').name('export towns');
     townFolder.open();
@@ -860,7 +864,7 @@ map = (function () {
       name: exportName(), mapName: mapName(), climate: gui.climate, bitDepth: Number(gui.bitDepth), smoothing: gui.smoothing,
       auto: gui.autoexpose, oceans: gui.include_oceans, oceanFloor: needsHeights ? oceanFloor() : 0,
       request: needsHeights ? scaleRequest() : null, heights: needsHeights ? readHeights() : null, analysis: analysis,
-      towns: {maxTowns: Math.round(gui.maxTowns), minSpacing: Number(gui.townSpacing), includeVillages: gui.includeVillages, originalNames: gui.townNames == 'original'},
+      towns: {maxTowns: Math.round(gui.maxTowns), minSpacing: Number(gui.townSpacing), includeVillages: gui.includeVillages, originalNames: gui.townNames == 'original', skipDangerous: gui.townSafety == 'skip dangerous'},
       view: viewKey()
     };
   }
@@ -998,18 +1002,25 @@ map = (function () {
     }));
   }
 
-  async function buildTowns(job, report) {
+  // h: the in-game heights the water comes from, when they differ from the job's.
+  async function buildTowns(job, report, h) {
+    var waterline = waterlineFor(job, h);
     var result = await townExport.build(Object.assign({
       bounds: job.bounds,
       width: job.out.width,
       height: job.out.height,
       northLeft: job.northLeft,
-      onStage: report
+      onStage: report,
+      waterNear: function(px, py) {
+        return heightmapExport.waterNear(job.bounds, job.out.width, job.out.height, px, py, TOWN_SITE_CLEARANCE / GAME_METERS_PER_PIXEL, waterline);
+      }
     }, job.towns));
+    // Yellow towns are safe, orange ones are exported but may never grow, and red ones were skipped.
     townLayer.clearLayers().addTo(map);
-    result.towns.forEach(function(t) {
-      L.circleMarker([t.lat, t.lng], {radius: 4, color: '#ffcc00', weight: 2, fillOpacity: 0.8})
-        .bindTooltip(t.name + ', size ' + t.size)
+    result.towns.concat(result.skipped).forEach(function(t) {
+      var skipped = result.skipped.indexOf(t) >= 0;
+      L.circleMarker([t.lat, t.lng], {radius: 4, color: skipped ? '#ff3030' : t.wet ? '#ff8c00' : '#ffcc00', weight: 2, fillOpacity: 0.8})
+        .bindTooltip(t.name + (skipped ? ', skipped' : ', size ' + t.size) + (t.wet ? ', within ' + TOWN_SITE_CLEARANCE + ' m of water' : ''))
         .addTo(townLayer);
     });
     return result;
@@ -1017,10 +1028,23 @@ map = (function () {
 
   function townSummary(result) {
     var names = result.towns.map(function(t) { return t.name; });
-    return [
+    var lines = [
       result.towns.length + ' towns, chosen from ' + result.candidates + ' places inside the map',
       names.slice(0, 10).join(', ') + (names.length > 10 ? ', ...' : '')
     ];
+    var list = function(towns) {
+      return towns.slice(0, 10).map(function(t) { return t.name; }).join(', ') + (towns.length > 10 ? ', ...' : '');
+    };
+    var risky = result.towns.filter(function(t) { return t.wet; });
+    if (result.skipped.length) lines.push('skipped within ' + TOWN_SITE_CLEARANCE + ' m of water: ' + list(result.skipped));
+    if (risky.length) lines.push('may never grow, within ' + TOWN_SITE_CLEARANCE + ' m of water: ' + list(risky));
+    return lines;
+  }
+
+  // Real meters at or below which the export makes water. Auto mode takes it from the analysis, since the fields only hold the in-game level.
+  function waterlineFor(job, h) {
+    h = h || (job.auto && job.analysis ? heightsFor(job.analysis, job.heights.k, job.oceans, fixedMax(job.request)) : job.heights);
+    return h.waterline !== undefined ? h.waterline : h.water / h.k;
   }
 
   function exportRegion() {
@@ -1049,7 +1073,7 @@ map = (function () {
       var lines = townSummary(result);
       lines[0] = 'Saved ' + lines[0];
       return lines;
-    }, false);
+    }, true);
   }
 
   // Laid out like the game's user data folder, so extracting it there puts every file where its import dialog looks.
@@ -1065,7 +1089,7 @@ map = (function () {
       // An OpenStreetMap outage shouldn't sink the whole export, so the zip goes out without towns and its name says so.
       var towns = null, townError = null;
       try {
-        towns = await buildTowns(job, step(3, 'towns'));
+        towns = await buildTowns(job, step(3, 'towns'), heightmap.heights);
       } catch (e) {
         townError = e.message;
       }

@@ -34,6 +34,7 @@ You now have a fully playable map!
 - include ocean data / ocean floor (m): Water below the water level takes its depth from NOAA's DEM Global Mosaic, which has real depths where the elevation tiles store water as a flat surface, and the ocean floor sets the lowest in-game height allowed. With it off, everything below sea level is clamped to 0 m. The game's lowest minimum height is -100.
 - bit depth: 16-bit grayscale PNG with no alpha channel by default. 8-bit is also available but its height steps are coarse.
 - town names: take latin-character only names or the original accented/character names.
+- generation safety: 'none' picks purely by population with 'dangerous' placements, those which might not work in game because of their proximity to water or lack of nearby land available, shown in orange. 'skip dangerous' will skip those ones instead and take others.
 - export all: runs the heightmap, biome and town exports and saves them together as `<file name>.zip`.
 - reference map: overlays OpenStreetMap for finding places.
 - screenshot: saves the current view as an 8-bit image for testing.
