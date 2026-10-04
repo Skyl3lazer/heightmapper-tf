@@ -228,7 +228,7 @@ map = (function () {
     gui.townSpacing = 1200;
     gui.includeVillages = true;
     gui.townNames = 'latin alphabet';
-    gui.townSafety = 'none';
+    gui.townSafety = 'nudge';
     townFolder.add(gui, 'maxTowns', 1, 300).step(1).name('max towns');
     townFolder.add(gui, 'townSpacing', 0, 5000).step(50).name('min town spacing (m)');
     townFolder.add(gui, 'includeVillages').name('include villages');
