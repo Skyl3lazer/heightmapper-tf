@@ -84,7 +84,7 @@
             font: 11px 'Lucida Grande', sans-serif;
         }
 
-        #status-message, .task {
+        #status-message, .task, #consent {
             margin-top: 4px;
             padding: 6px 8px;
             background-color: rgba(0, 0, 0, .75);
@@ -93,6 +93,11 @@
 
         #status-message {
             color: #ff8080;
+        }
+
+        #consent button {
+            margin: 6px 6px 0 0;
+            font: inherit;
         }
 
         .dg .property-name.has-sign {
@@ -351,7 +356,7 @@
     <div id="help-blocker"></div>
     <div id="map"></div>
     <div id="export-box"><div id="export-box-label"><div id="export-box-size"></div><div id="export-box-water"></div><div id="export-box-notices"></div></div></div>
-    <div id="status"><div id="tasks"></div><div id="status-message"></div></div>
+    <div id="status"><div id="tasks"></div><div id="status-message"></div><div id="consent" hidden>Remember your settings in this browser? Nothing is sent anywhere.<br><button id="consent-yes">Remember</button><button id="consent-no">No thanks</button></div></div>
 
     <!-- 3rd party libraries -->
     <script src="https://unpkg.com/leaflet@1.0.1/dist/leaflet.js"></script>

@@ -31,6 +31,10 @@ map = (function () {
   // In-game meters the nudge options may move a town to find a spot where its first street works.
   const TOWN_NUDGE_REACH = 200;
   const SIGN_GLYPHS = {warning: '\u26a0\ufe0e', info: '\u24d8'};
+  const SETTINGS_KEY = 'heightmapper-settings', CONSENT_KEY = 'heightmapper-remember';
+  // Panel choices kept between visits. Climate, the heights and the view follow the place on the map, so they aren't kept.
+  const SAVED_SETTINGS = ['include_oceans', 'reference_map', 'mapSize', 'ratio', 'orientation', 'scaleMode', 'smoothing', 'oceanFloor', 'bitDepth',
+    'maxTowns', 'townSpacing', 'includeVillages', 'townNames', 'townSafety', 'fileName'];
   // The game has one water level, so a lake's level drowns all lower land. Auto mode skips levels drowning more than this share of the map.
   const MAX_FLOOD_SHARE = 0.15;
   // ...and levels drowning more than this many times the water body's own area, like a tiny flat patch at the bottom of a dry valley.
@@ -246,14 +250,89 @@ map = (function () {
     gui.exportAll = function () { exportAll(); };
     gui.add(gui, 'exportAll').name('export all');
 
+    setUpRemembering();
     gui.help = function () {
       // show help screen and input blocker
       toggleHelp(true);
     }
     gui.add(gui, 'help');
+    restoreSettings();
     updateEditable();
     
   }
+  // localStorage, or null where the browser blocks it.
+  var store = (function() {
+    try {
+      window.localStorage.getItem(CONSENT_KEY);
+      return window.localStorage;
+    } catch (e) {
+      return null;
+    }
+  }());
+
+  // Settings are only kept once the visitor agrees. The answer itself is kept either way, so the question isn't asked twice.
+  function setUpRemembering() {
+    if (!store) return;
+    gui.rememberSettings = remembering();
+    gui.add(gui, 'rememberSettings').name('remember settings').onChange(setRemembering).__li.title = 'Keeps these panel choices in this browser for your next visit. Nothing is sent anywhere.';
+    document.getElementById('consent').hidden = store.getItem(CONSENT_KEY) !== null;
+    document.getElementById('consent-yes').onclick = function() { setRemembering(true); };
+    document.getElementById('consent-no').onclick = function() { setRemembering(false); };
+    // Saving when the page is hidden or closed catches every change without taking over the fields' own handlers.
+    document.addEventListener('visibilitychange', function() {
+      if (document.visibilityState == 'hidden') saveSettings();
+    });
+    window.addEventListener('pagehide', saveSettings);
+  }
+
+  function remembering() {
+    return store !== null && store.getItem(CONSENT_KEY) == 'yes';
+  }
+
+  function setRemembering(value) {
+    store.setItem(CONSENT_KEY, value ? 'yes' : 'no');
+    if (value) saveSettings();
+    else store.removeItem(SETTINGS_KEY);
+    gui.rememberSettings = value;
+    controller('rememberSettings').updateDisplay();
+    document.getElementById('consent').hidden = true;
+  }
+
+  function saveSettings() {
+    if (!remembering()) return;
+    var saved = {request: requestedText};
+    SAVED_SETTINGS.forEach(function(key) { saved[key] = gui[key]; });
+    store.setItem(SETTINGS_KEY, JSON.stringify(saved));
+  }
+
+  // Skips anything the panel no longer offers, such as an option renamed since the visit that saved it.
+  function restoreSettings() {
+    if (!remembering()) return;
+    var saved;
+    try {
+      saved = JSON.parse(store.getItem(SETTINGS_KEY)) || {};
+    } catch (e) {
+      return;
+    }
+    SAVED_SETTINGS.forEach(function(key) {
+      var c = controller(key);
+      if (c && key in saved && validSetting(c, saved[key])) gui[key] = saved[key];
+    });
+    if (typeof saved.request == 'string' && saved.request) {
+      requestedText = saved.request;
+      // The scale field in use shows the request until the analysis fills in the others.
+      gui[{'height scale': 'heightScale', 'steepness': 'steepness', 'max height': 'maxHeight'}[gui.scaleMode]] = requestedText;
+    }
+    if (gui.reference_map) referenceLayer.addTo(map);
+    refreshGUI();
+  }
+
+  function validSetting(c, value) {
+    if (c.__select) return Array.prototype.some.call(c.__select.options, function(o) { return o.value === String(value); });
+    if (typeof c.initialValue == 'number') return typeof value == 'number' && value >= c.__min && value <= c.__max;
+    return typeof value == typeof c.initialValue;
+  }
+
   // The export region's size in pixels, north up.
   function outputSize() {
     var km = MAP_SIZES[gui.mapSize][RATIOS.indexOf(gui.ratio)];
