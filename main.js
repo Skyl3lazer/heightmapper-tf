@@ -231,7 +231,13 @@ map = (function () {
     townFolder.add(gui, 'townSpacing', 0, 5000).step(50).name('min town spacing (m)');
     townFolder.add(gui, 'includeVillages').name('include villages');
     townFolder.add(gui, 'townNames', ['latin alphabet', 'original']).name('town names');
-    townFolder.add(gui, 'townSafety', {'none': 'none', 'skip dangerous': 'skip', 'nudge-skip': 'nudge', 'nudge-force': 'force'}).name('generation safety');
+    townFolder.add(gui, 'townSafety', {'none': 'none', 'skip dangerous': 'skip', 'nudge-skip': 'nudge', 'nudge-force': 'force'}).name('generation safety').__li.title = [
+      'none: picks purely by population. Dangerous placements might not work in game because they sit near water or lack nearby land. They show in orange.',
+      'skip dangerous: skips those and takes others instead.',
+      'nudge-skip: moves an unsafe town to the nearest safe pixel within ' + TOWN_NUDGE_REACH + ' m that it can reach over land. A town in water starts from the nearest shore. If there is no such pixel, the town is skipped.',
+      'nudge-force: takes the nearest safe pixel within ' + TOWN_NUDGE_REACH + ' m in a straight line, even across water. If there is none, the town is skipped.',
+      'Nudged towns show in blue. Skipped towns show in red.'
+    ].join('\n');
     gui.exportTowns = function () { exportTowns(); };
     townFolder.add(gui, 'exportTowns').name('export towns');
     townFolder.open();
