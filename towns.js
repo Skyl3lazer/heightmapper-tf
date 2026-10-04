@@ -136,6 +136,18 @@ var townExport = (function () {
     return h >>> 0;
   }
 
+  // Lets the page repaint between nudges. A timer would be held to once a second in a background tab.
+  function yieldToPage() {
+    return new Promise(resolve => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => {
+        channel.port1.close();
+        resolve();
+      };
+      channel.port2.postMessage(null);
+    });
+  }
+
   function snap(meters) {
     return Math.round(meters / GAME_METERS_PER_PIXEL) * GAME_METERS_PER_PIXEL;
   }
@@ -181,38 +193,44 @@ var townExport = (function () {
     }
     moves.sort((a, b) => a[0] * a[0] + a[1] * a[1] - b[0] * b[0] - b[1] * b[1]);
 
-    // The town to export for candidate c: where it is, at the nearest position within reach whose street can be built, or null to skip it.
-    async function settle(c) {
-      if (!terrainPatch) return c;
+    // Moves and street angles are in the game's frame, which a landscape export turns against the patch's east and north.
+    const turn = (dx, dy) => northLeft ? [dy, -dx] : [dx, dy];
+    function problemsAt(tester, c, dx, dy) {
+      const [u, v] = turn(dx, dy), angle = streetAngle(c.x + dx, c.y + dy);
+      const [du, dv] = turn(Math.cos(angle), Math.sin(angle));
+      return tester.problems(u, v, du, dv);
+    }
+
+    // Sets c.town to the town to export for candidate c, or null to skip it. A town that needs a nudge keeps its tester for nudge instead.
+    async function check(c) {
       const r = Math.ceil((reach + STREET_HALF_LENGTH + MIN_WATER_GAP + WATER_CELL_HALF) / GAME_METERS_PER_PIXEL) + 1;
       const tester = streetTester(await terrainPatch(c.px, c.py, r), r, waterline, heightScale);
+      c.problems = problemsAt(tester, c, 0, 0);
+      if (!c.problems.length) c.town = c;
+      else if (!reach) c.town = keepUnsafe ? c : null;
+      else c.tester = tester;
+    }
+
+    // The town at the nearest position within reach whose street can be built, or null if there is none.
+    function nudge(c) {
+      const tester = c.tester;
+      delete c.tester;
       const east = (c.px - (width - 1) / 2) * GAME_METERS_PER_PIXEL, north = ((height - 1) / 2 - c.py) * GAME_METERS_PER_PIXEL;
-      let connected = null;
+      const connected = overLand ? tester.connected(reach) : null;
       for (const [dx, dy] of moves) {
-        // Moves and the street angle are in the game's frame, which a landscape export turns against the patch.
-        const u = northLeft ? dy : dx, v = northLeft ? -dx : dy;
+        const [u, v] = turn(dx, dy);
         if (Math.abs(east + u) > halfX - EDGE_MARGIN || Math.abs(north + v) > halfY - EDGE_MARGIN) continue;
-        if (connected && !connected(u, v)) continue;
-        const angle = streetAngle(c.x + dx, c.y + dy);
-        const problems = northLeft ? tester.problems(u, v, Math.sin(angle), -Math.cos(angle)) : tester.problems(u, v, Math.cos(angle), Math.sin(angle));
-        if (!dx && !dy) {
-          c.problems = problems;
-          if (!problems.length) return c;
-          if (!reach) return keepUnsafe ? c : null;
-          if (overLand) connected = tester.connected(reach);
-          continue;
-        }
-        if (problems.length) continue;
+        if ((!dx && !dy) || (connected && !connected(u, v)) || problemsAt(tester, c, dx, dy).length) continue;
         const px = c.px + u / GAME_METERS_PER_PIXEL, py = c.py - v / GAME_METERS_PER_PIXEL;
         const p = heightmapExport.unproject(nw.x + px / (width - 1) * (se.x - nw.x), nw.y + py / (height - 1) * (se.y - nw.y));
         return Object.assign({}, c, {x: c.x + dx, y: c.y + dy, px: px, py: py, lat: p.lat, lng: p.lng, from: c, moved: Math.hypot(dx, dy)});
       }
-      return keepUnsafe ? c : null;
+      return null;
     }
 
     const centerLng = (bounds.west + bounds.east) / 2;
     const candidates = [];
-    let towns = [], skipped = [];
+    let towns = [], skipped = [], nudgesDone = 0, nudgesDue = 0;
     for (const [tag, plural] of includeVillages ? PLACE_TIERS : PLACE_TIERS.slice(0, 2)) {
       onStage('Looking up ' + plural + '...');
       for (const place of await overpass.nodes(bounds, `["place"="${tag}"]`)) {
@@ -228,16 +246,32 @@ var townExport = (function () {
           px: Math.round(x / GAME_METERS_PER_PIXEL + (width - 1) / 2), py: Math.round((height - 1) / 2 - y / GAME_METERS_PER_PIXEL)});
       }
       candidates.sort((a, b) => b.population - a.population);
-      if (terrainPatch) onStage('Checking town streets...');
-      towns = [];
-      skipped = [];
-      for (const c of candidates) {
-        if (towns.length >= maxTowns) break;
-        // Only towns that could still be picked get checked, and each only once across the tiers.
-        if (!towns.every(t => Math.hypot(t.x - c.x, t.y - c.y) + reach >= minSpacing)) continue;
-        if (c.town === undefined) c.town = await settle(c);
-        if (!c.town) skipped.push(c);
-        else if (towns.every(t => Math.hypot(t.x - c.town.x, t.y - c.town.y) >= minSpacing)) towns.push(c.town);
+      // Nudges run in batches between passes so the progress bar knows how many are due.
+      // A nudge can free a place or crowd a neighbor, which the next pass settles.
+      for (;;) {
+        onStage('Checking town streets...');
+        towns = [];
+        skipped = [];
+        const waiting = [];
+        for (const c of candidates) {
+          if (towns.length >= maxTowns) break;
+          // Only towns that could still be picked get checked, and each only once across the tiers.
+          if (!towns.every(t => Math.hypot(t.x - c.x, t.y - c.y) + reach >= minSpacing)) continue;
+          if (c.town === undefined && !c.tester) await check(c);
+          // A town waiting for its nudge holds its place where it is for now.
+          if (c.town === undefined) waiting.push(c);
+          const town = c.town === undefined ? c : c.town;
+          if (!town) skipped.push(c);
+          else if (towns.every(t => Math.hypot(t.x - town.x, t.y - town.y) >= minSpacing)) towns.push(town);
+        }
+        if (!waiting.length) break;
+        nudgesDue += waiting.length;
+        for (const c of waiting) {
+          onStage('Nudging town ' + (nudgesDone + 1) + ' of ' + nudgesDue + '...', nudgesDone / nudgesDue);
+          await yieldToPage();
+          c.town = nudge(c);
+          nudgesDone++;
+        }
       }
       if (towns.length >= maxTowns) break;
     }

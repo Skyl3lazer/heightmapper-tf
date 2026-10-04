@@ -10,7 +10,7 @@ map = (function () {
   var analysisGeneration = 0;
   // What the user typed into whichever of height scale and steepness "scale by" picks. Auto mode may show less so high peaks fit under the game's limit.
   var requestedText = '1';
-  var steepnessWarning, heightScaleHint, climateHint, waterHint, bitDepthHint, scaleCapHint;
+  var steepnessWarning, heightScaleHint, climateHint, waterHint, bitDepthHint, scaleCapHint, townNamesHint;
   var signs = [];
   // The climate follows the analysis's suggestion until the user picks a different one.
   var climateFollows = true;
@@ -228,7 +228,7 @@ map = (function () {
     townFolder.add(gui, 'maxTowns', 1, 300).step(1).name('max towns');
     townFolder.add(gui, 'townSpacing', 0, 5000).step(50).name('min town spacing (m)');
     townFolder.add(gui, 'includeVillages').name('include villages');
-    townFolder.add(gui, 'townNames', ['latin alphabet', 'original']).name('town names');
+    townNamesHint = addSign(townFolder.add(gui, 'townNames', ['latin alphabet', 'original']).name('town names').onChange(updateHints), 'info');
     townFolder.add(gui, 'townSafety', {'none': 'none', 'skip dangerous': 'skip', 'nudge-skip': 'nudge', 'nudge-force': 'force'}).name('generation safety').__li.title = [
       'The game starts every town with one 88 m street through its position. If that street would be too steep or touch water, the town never grows.',
       'none: picks purely by population. Dangerous towns show in orange.',
@@ -542,6 +542,7 @@ map = (function () {
     var water = suggestedWaterLevel();
     showSign(waterHint, water !== null && water != Number(gui.waterLevel) ? 'The most common water level in this section is ' + water : null);
     showSign(bitDepthHint, Number(gui.bitDepth) != 16 ? '16 is recommended for game export' : null);
+    showSign(townNamesHint, gui.townNames == 'original' ? 'Some names may not display properly in-game' : null);
   }
 
   // The level auto-exposure would pick, or null when no water body qualifies.
