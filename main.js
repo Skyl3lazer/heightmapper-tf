@@ -1168,12 +1168,12 @@ map = (function () {
       heightmap.terrain = null;
       var biomes = await buildBiomes(job, step(3, 'biomes'), heightmap.heights, true);
       var zipName = job.name + (towns ? '' : '_NO_TOWNS') + '.zip';
-      report('Writing ' + zipName + '...');
+      report('Writing ' + zipName + '...', 0);
       var files = [{path: 'heightmaps/' + job.name + '.png', blob: heightmap.blob}].concat(biomeFiles(biomes, job.name).map(function(f) {
         return {path: 'biomes/' + f.path, blob: f.blob};
       }));
       if (towns) files.push({path: 'towns_industries/' + job.name + '.lua', blob: new Blob([towns.lua], {type: 'text/plain'})});
-      saveAs(await heightmapExport.zip(files), zipName);
+      saveAs(await heightmapExport.zip(files, function(f) { report('Writing ' + zipName + '...', f); }), zipName);
       return ['Saved ' + zipName + ' for ' + job.climate + '. Extract it into the Transport Fever 3 user folder, %APPDATA%\\Transport Fever 3.']
         .concat(heightmapSummary(heightmap, job).slice(0, 4), biomeSummary(biomes), towns ? townSummary(towns, job) : ['towns left out because ' + townError]);
     }, true);

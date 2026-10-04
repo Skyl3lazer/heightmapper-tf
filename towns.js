@@ -136,18 +136,6 @@ var townExport = (function () {
     return h >>> 0;
   }
 
-  // Lets the page repaint between nudges. A timer would be held to once a second in a background tab.
-  function yieldToPage() {
-    return new Promise(resolve => {
-      const channel = new MessageChannel();
-      channel.port1.onmessage = () => {
-        channel.port1.close();
-        resolve();
-      };
-      channel.port2.postMessage(null);
-    });
-  }
-
   function snap(meters) {
     return Math.round(meters / GAME_METERS_PER_PIXEL) * GAME_METERS_PER_PIXEL;
   }
@@ -249,7 +237,9 @@ var townExport = (function () {
       // Nudges run in batches between passes so the progress bar knows how many are due.
       // A nudge can free a place or crowd a neighbor, which the next pass settles.
       for (;;) {
-        onStage('Checking town streets...');
+        // Progress counts towns placed against the most this tier can place.
+        const target = Math.max(1, Math.min(maxTowns, candidates.length));
+        onStage('Checking town streets...', 0);
         towns = [];
         skipped = [];
         const waiting = [];
@@ -257,7 +247,10 @@ var townExport = (function () {
           if (towns.length >= maxTowns) break;
           // Only towns that could still be picked get checked, and each only once across the tiers.
           if (!towns.every(t => Math.hypot(t.x - c.x, t.y - c.y) + reach >= minSpacing)) continue;
-          if (c.town === undefined && !c.tester) await check(c);
+          if (c.town === undefined && !c.tester) {
+            onStage('Checking town streets...', towns.length / target);
+            await check(c);
+          }
           // A town waiting for its nudge holds its place where it is for now.
           if (c.town === undefined) waiting.push(c);
           const town = c.town === undefined ? c : c.town;
@@ -268,7 +261,7 @@ var townExport = (function () {
         nudgesDue += waiting.length;
         for (const c of waiting) {
           onStage('Nudging town ' + (nudgesDone + 1) + ' of ' + nudgesDue + '...', nudgesDone / nudgesDue);
-          await yieldToPage();
+          await heightmapExport.yieldToPage();
           c.town = nudge(c);
           nudgesDone++;
         }

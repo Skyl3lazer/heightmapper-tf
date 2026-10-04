@@ -21,6 +21,8 @@ var heightmapExport = (function () {
   const LANDCOVER_URL = 'https://ic.imagery1.arcgis.com/arcgis/rest/services/Sentinel2_10m_LandCover/ImageServer/exportImage';
   // Depth and land cover vary slowly next to the game's biome blending, so they're fetched at most this many pixels across.
   const RASTER_MAX_SIZE = 2049;
+  // Bytes handed to the PNG compressor at a time, which sets how often its progress is reported.
+  const PNG_CHUNK = 1 << 20;
   // Impact Observatory land cover classes.
   const LC_NO_DATA = 0, LC_WATER = 1, LC_TREES = 2, LC_FLOODED = 4, LC_BARE = 8, LC_SNOW = 9, LC_CLOUDS = 10;
   // Transport Fever 3 writes biomes 0 to 4 as these gray levels.
@@ -82,6 +84,18 @@ var heightmapExport = (function () {
 
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  // Lets the page repaint during long computations. A timer would be held to once a second in a background tab.
+  function yieldToPage() {
+    return new Promise(resolve => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => {
+        channel.port1.close();
+        resolve();
+      };
+      channel.port2.postMessage(null);
+    });
   }
 
   async function fetchTile(z, x, y) {
@@ -312,7 +326,11 @@ var heightmapExport = (function () {
   }
 
   // Stored, uncompressed ZIP. The PNGs inside are already compressed, so deflating again would gain little.
-  async function makeZip(files) {
+  // onProgress(fraction): called as the files are read.
+  async function makeZip(files, onProgress) {
+    onProgress = onProgress || function () {};
+    const total = files.reduce((n, file) => n + file.blob.size, 0);
+    let done = 0;
     const now = new Date();
     const time = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
     const date = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
@@ -322,6 +340,8 @@ var heightmapExport = (function () {
       const name = new TextEncoder().encode(file.path);
       const size = file.blob.size;
       const crc = crc32(new Uint8Array(await file.blob.arrayBuffer()));
+      done += size;
+      onProgress(done / total);
 
       const local = new DataView(new ArrayBuffer(30));
       local.setUint32(0, 0x04034b50, true);
@@ -358,7 +378,8 @@ var heightmapExport = (function () {
     return new Blob(parts.concat(central, [end]), {type: 'application/zip'});
   }
 
-  async function encodeGrayPng(samples, width, height, bitDepth, text) {
+  // onProgress(fraction): called as the image data goes into the compressor.
+  async function encodeGrayPng(samples, width, height, bitDepth, text, onProgress) {
     const bytesPerSample = bitDepth / 8;
     const stride = 1 + width * bytesPerSample;
     const raw = new Uint8Array(stride * height);
@@ -381,8 +402,20 @@ var heightmapExport = (function () {
       previous.set(scanline);
     }
 
-    const compressed = new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate'));
-    const idat = new Uint8Array(await new Response(compressed).arrayBuffer());
+    let fed = 0;
+    const source = new ReadableStream({
+      async pull(controller) {
+        if (fed >= raw.length) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(raw.subarray(fed, fed + PNG_CHUNK));
+        fed = Math.min(raw.length, fed + PNG_CHUNK);
+        if (onProgress) onProgress(fed / raw.length);
+        await yieldToPage();
+      }
+    });
+    const idat = new Uint8Array(await new Response(source.pipeThrough(new CompressionStream('deflate'))).arrayBuffer());
 
     const ihdr = new Uint8Array(13);
     const ihdrView = new DataView(ihdr.buffer);
@@ -498,7 +531,8 @@ var heightmapExport = (function () {
 
   // ArcGIS image services return raw pixels on exactly our grid when asked for band-sequential Web Mercator output.
   // ArcGIS image services return no data past the antimeridian, so a box crossing it is fetched in pieces, each shifted back into the world.
-  async function fetchImageServer(url, region, width, height, pixelType, interpolation) {
+  // onProgress(fraction): called as the image downloads. The server's own preparation time can't be measured.
+  async function fetchImageServer(url, region, width, height, pixelType, interpolation, onProgress) {
     const out = new (pixelType === 'F32' ? Float32Array : Uint8Array)(width * height);
     const cell = (region.x1 - region.x0) / (width - 1);
     for (let c = 0; c < width;) {
@@ -506,7 +540,9 @@ var heightmapExport = (function () {
       let end = c;
       while (end + 1 < width && Math.floor(region.x0 + (end + 1) * cell) === world) end++;
       const columns = end - c + 1;
-      const piece = await fetchImagePiece(url, region.x0 + c * cell - world, columns, cell, region, height, pixelType, interpolation);
+      const before = c;
+      const piece = await fetchImagePiece(url, region.x0 + c * cell - world, columns, cell, region, height, pixelType, interpolation,
+        f => { if (onProgress) onProgress((before + f * columns) / width); });
       for (let r = 0; r < height; r++) out.set(piece.subarray(r * columns, (r + 1) * columns), r * width + c);
       c = end + 1;
     }
@@ -514,7 +550,7 @@ var heightmapExport = (function () {
   }
 
   // Columns from normalized x0, cell apart, all inside one copy of the world.
-  async function fetchImagePiece(url, x0, width, cell, region, height, pixelType, interpolation) {
+  async function fetchImagePiece(url, x0, width, cell, region, height, pixelType, interpolation, onProgress) {
     const span = 2 * Math.PI * 6378137;
     const dx = cell * span, dy = (region.y1 - region.y0) * span / (height - 1);
     const west = (x0 - 0.5) * span - dx / 2, east = (x0 + (width - 1) * cell - 0.5) * span + dx / 2;
@@ -527,10 +563,18 @@ var heightmapExport = (function () {
     });
     const response = await fetch(url + '?' + params, {signal: AbortSignal.timeout(120000)});
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const buffer = await response.arrayBuffer();
     const floats = pixelType === 'F32';
-    if (buffer.byteLength < width * height * (floats ? 4 : 1)) throw new Error('short response');
-    return floats ? new Float32Array(buffer, 0, width * height) : new Uint8Array(buffer, 0, width * height);
+    const expected = width * height * (floats ? 4 : 1), bytes = new Uint8Array(expected);
+    let received = 0;
+    for (const reader = response.body.getReader();;) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      if (received < expected) bytes.set(value.subarray(0, expected - received), received);
+      received += value.length;
+      onProgress(Math.min(1, received / expected));
+    }
+    if (received < expected) throw new Error('short response');
+    return floats ? new Float32Array(bytes.buffer) : bytes;
   }
 
   function rasterSize(width, height) {
@@ -560,13 +604,14 @@ var heightmapExport = (function () {
   }
 
   // Cells at or below submerge.level take NOAA depths, and every one ends at or below submerge.top so it sits under the water.
-  async function applyBathymetry(heights, width, height, region, submerge) {
+  // onProgress(fraction): as for fetchImageServer.
+  async function applyBathymetry(heights, width, height, region, submerge, onProgress) {
     const {level, top} = submerge;
     if (!heights.some(h => h <= level)) return 'no water below the water level';
     const {width: bw, height: bh} = rasterSize(width, height);
     let depth = null, note = 'NOAA water depths applied';
     try {
-      depth = await fetchImageServer(BATHYMETRY_URL, region, bw, bh, 'F32', 'RSP_BilinearInterpolation');
+      depth = await fetchImageServer(BATHYMETRY_URL, region, bw, bh, 'F32', 'RSP_BilinearInterpolation', onProgress);
       fillGaps(depth, bw, bh, 8);
     } catch (e) {
       note = 'NOAA water depths unavailable (' + e.message + ')';
@@ -597,7 +642,8 @@ var heightmapExport = (function () {
     return Math.round((Math.sqrt(4 * sigma * sigma + 1) - 1) / 2);
   }
 
-  function smoothLand(heights, width, height, sigma, level) {
+  // onProgress(fraction): called after each pass, and awaited.
+  async function smoothLand(heights, width, height, sigma, level, onProgress) {
     const r = boxRadius(sigma);
     if (r < 1) return;
     const sum = new Float32Array(heights.length), weight = new Float32Array(heights.length);
@@ -609,7 +655,9 @@ var heightmapExport = (function () {
     }
     for (let pass = 0; pass < 3; pass++) {
       boxSum(sum, width, height, r);
+      if (onProgress) await onProgress((2 * pass + 1) / 6);
       boxSum(weight, width, height, r);
+      if (onProgress) await onProgress((2 * pass + 2) / 6);
     }
     for (let i = 0; i < heights.length; i++) if (heights[i] > level) heights[i] = sum[i] / weight[i];
   }
@@ -698,10 +746,10 @@ var heightmapExport = (function () {
     const region = boundsToRegion(bounds);
     const {width: gw, height: gh} = rasterSize(width, height);
 
-    onStage('Fetching elevation tiles...');
-    const heights = await sampleRegion(region, gw, gh, pickZoom(region.x1 - region.x0, gw, 1), function () {});
+    onStage('Fetching elevation tiles...', 0);
+    const heights = await sampleRegion(region, gw, gh, pickZoom(region.x1 - region.x0, gw, 1), f => onStage('Fetching elevation tiles...', f));
     onStage('Fetching land cover...');
-    const cover = await fetchImageServer(LANDCOVER_URL, region, gw, gh, 'U8', 'RSP_NearestNeighbor');
+    const cover = await fetchImageServer(LANDCOVER_URL, region, gw, gh, 'U8', 'RSP_NearestNeighbor', f => onStage('Fetching land cover...', f));
 
     const spacing = GAME_METERS_PER_PIXEL * (width - 1) / (gw - 1);
     const realSpacing = groundWidth(region) / (gw - 1);
@@ -756,23 +804,26 @@ var heightmapExport = (function () {
     const columns = new Int32Array(width), rows = new Int32Array(height);
     for (let i = 0; i < width; i++) columns[i] = Math.round(i * (gw - 1) / (width - 1));
     for (let j = 0; j < height; j++) rows[j] = Math.round(j * (gh - 1) / (height - 1));
-    async function encode(grid, gray) {
+    async function encode(grid, gray, onProgress) {
       const samples = new Uint8Array(width * height);
       for (let j = 0; j < height; j++) {
         const row = rows[j] * gw;
         for (let i = 0; i < width; i++) samples[j * width + i] = gray[grid[row + columns[i]]];
       }
-      return encodeTurned(samples, width, height, 8, {}, northLeft);
+      return encodeTurned(samples, width, height, 8, {}, northLeft, onProgress);
     }
-    onStage('Writing biome maps...');
     const share = (grid, value) => grid.reduce((n, v) => n + (v === value ? 1 : 0), 0) / grid.length;
+    const keys = CLIMATE_LAYERS[climate] || CLIMATE_LAYERS.Temperate;
+    const writing = k => f => onStage('Writing biome maps...', (k + f) / (keys.length + 1));
     const layers = [];
-    for (const key of CLIMATE_LAYERS[climate] || CLIMATE_LAYERS.Temperate) {
+    for (const [k, key] of keys.entries()) {
+      writing(k)(0);
+      await yieldToPage();
       const grid = masks[key]();
-      layers.push({key: key, blob: await encode(grid, [0, 255]), share: share(grid, 1)});
+      layers.push({key: key, blob: await encode(grid, [0, 255], writing(k)), share: share(grid, 1)});
     }
     return {
-      biomes: await encode(biome, BIOME_GRAY),
+      biomes: await encode(biome, BIOME_GRAY, writing(keys.length)),
       biomeShares: [0, 1, 2, 3, 4].map(b => share(biome, b)),
       layers: layers
     };
@@ -939,8 +990,8 @@ var heightmapExport = (function () {
     return out;
   }
 
-  function encodeTurned(samples, width, height, bitDepth, text, northLeft) {
-    return northLeft ? encodeGrayPng(rotateLeft(samples, width, height), height, width, bitDepth, text) : encodeGrayPng(samples, width, height, bitDepth, text);
+  function encodeTurned(samples, width, height, bitDepth, text, northLeft, onProgress) {
+    return northLeft ? encodeGrayPng(rotateLeft(samples, width, height), height, width, bitDepth, text, onProgress) : encodeGrayPng(samples, width, height, bitDepth, text, onProgress);
   }
 
   // Land masses that don't reach the edge of the map are islands.
@@ -974,7 +1025,7 @@ var heightmapExport = (function () {
     // Sampled exactly as render samples the map, so this is the terrain in the heightmap.
     const heights = await sampleRegion(patch, full, full, pickZoom(region.x1 - region.x0, width, 2), function () {});
     if (!pad) return heights;
-    smoothLand(heights, full, full, smoothing, level);
+    await smoothLand(heights, full, full, smoothing, level);
     const out = new Float32Array(size * size);
     for (let j = 0; j < size; j++) out.set(heights.subarray((j + pad) * full + pad, (j + pad) * full + pad + size), j * size);
     return out;
@@ -1007,7 +1058,7 @@ var heightmapExport = (function () {
     const sea = submerge ? submerge(water, floodShare, areaKm2) : null;
     let bathymetry = null;
     if (sea) bathymetry = await applyBathymetry(heights, width, height, region, sea);
-    if (smoothing) smoothLand(heights, width, height, smoothing * (width - 1) / (outputWidth - 1), sea ? sea.level : -Infinity);
+    if (smoothing) await smoothLand(heights, width, height, smoothing * (width - 1) / (outputWidth - 1), sea ? sea.level : -Infinity);
     if (sea || smoothing) extremes = clampAndMeasure(heights, floor, ceiling);
     return {
       min: extremes.lo, max: extremes.hi, peak: peak, groundWidth: groundWidth(region), areaKm2: areaKm2,
@@ -1031,13 +1082,17 @@ var heightmapExport = (function () {
     let bathymetry = null;
     if (submerge) {
       onStage('Fetching water depths...');
-      bathymetry = await applyBathymetry(heights, width, height, region, submerge);
+      bathymetry = await applyBathymetry(heights, width, height, region, submerge, f => onStage('Fetching water depths...', f));
     }
     // limits sees the peak before smoothing, the same one the preview measures.
     const peak = highest(heights);
     if (smoothing) {
-      onStage('Smoothing terrain...');
-      smoothLand(heights, width, height, smoothing, waterLevel);
+      onStage('Smoothing terrain...', 0);
+      await yieldToPage();
+      await smoothLand(heights, width, height, smoothing, waterLevel, f => {
+        onStage('Smoothing terrain...', f);
+        return yieldToPage();
+      });
     }
 
     const {floor, ceiling} = limits(peak);
@@ -1065,7 +1120,8 @@ var heightmapExport = (function () {
       upsampled: (region.x1 - region.x0) * TILE_SIZE * 2 ** zoom < width - 1
     }, bounds, options.meta);
 
-    const blob = await encodeTurned(samples, width, height, bitDepth, {Description: JSON.stringify(meta)}, northLeft);
+    onStage('Writing PNG...', 0);
+    const blob = await encodeTurned(samples, width, height, bitDepth, {Description: JSON.stringify(meta)}, northLeft, f => onStage('Writing PNG...', f));
     return {blob: blob, meta: meta, terrain: heights};
   }
 
@@ -1084,6 +1140,7 @@ var heightmapExport = (function () {
     render: render,
     renderBiomes: renderBiomes,
     terrainPatch: terrainPatch,
-    zip: makeZip
+    zip: makeZip,
+    yieldToPage: yieldToPage
   };
 }());
