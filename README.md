@@ -38,6 +38,8 @@ You now have a fully playable map!
 - screenshot: saves the current view as an 8-bit image for testing.
 - Press the "h" key to toggle UI visibility.
 
+#### Export Info
+
 Images generate at 256 px per in-game km plus 1 on each axis, e.g. 7169 x 7169 for a 28 x 28 km Gigantomaniac map.
 
 The live values come from a coarse preview of the box. If the full-resolution export finds a higher peak or a lower point, it widens the range, so always enter the values from the finished task in the bottom-left panel. The PNG's `Description` text chunk also stores them as JSON.
