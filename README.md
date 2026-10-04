@@ -19,13 +19,17 @@ A fork of [tangrams/heightmapper](https://github.com/tangrams/heightmapper) that
 
 You now have a fully playable map!
 
-Other controls:
+### Other controls:
 
 - maximum height, minimum height, water level: the values to enter in the game. With auto-exposure on they are measured from the area inside the box, or you can type your own. The game accepts heights from -100 to 3177. Auto-exposure lowers the height scale or steepness just enough to fit the highest point under 3177. It returns to your value when you move somewhere lower. With auto-exposure off, terrain above 3177 is flattened.
 - The box label lists the water levels of the flat water surfaces it finds (seas, lakes, reservoirs), largest first, with their area. Transport Fever has a single water level, so pick the one you want and enter it in the game. Auto-exposure picks the largest water body that doesn't flood the entire map, but it's not going to work in every situation.
 - climate: the Transport Fever 3 climate the map is for. The box label suggests one from the latitude and land cover inside the box.
-- export biomes: writes `<file name>_biomes.png` plus the climate's masks for Transport Fever 3's Biomes import, the same size as the heightmap. Temperate gets mountains and rivers, Dry gets coast hills, mesas, monument valley, mountains and rivers, Tropical gets islands, mountains and volcanoes, and Subarctic gets lakes, mountains and swamps. Biomes come from Esri's Sentinel-2 land cover and real-world slope. Browsers may ask to allow multiple downloads the first time.
-- scale by, height scale, steepness: how real heights become in-game heights. Height scale is in-game height per real meter, so 1 keeps real heights. Steepness is how many times steeper than real the slopes come out. The game draws each pixel 4 m wide, so a map covering more real ground than that squeezes the land sideways. "Scale by" lets you switch between modes. Steepness above 4x or so will look weird. Heights scale around sea level, so the sea stays at the water level.
+- export biomes: writes `<file name>_biomes.png` plus the climate's masks for Transport Fever 3's Biomes import, the same size as the heightmap. Based on climate, this includes: 
+    - temperate: mountains, and rivers
+    - dry: coast hills, mesas, monument valley, mountains, and rivers
+    - tropical: islands, mountains, and volcanoes
+    - subarctic: lakes, mountains, and swamps
+- scale by, height scale, steepness: how real heights become in-game heights. Height scale is in-game height per real meter, so 1 keeps real heights. Steepness is how many times steeper than real the slopes come out. The game draws each pixel 4 m wide, so a map covering more real ground than that squeezes the land sideways, leading to crazy tall mountains. "Scale by" lets you switch between modes to find whatever you think looks best. Steepness above 4x or so will look weird depending on the region. Heights scale around sea level, so the sea stays at the water level.
 - smoothing (in-game m): blurs the land over roughly this distance in the game's own meters, to calm bumpy real-world data. 0 turns it off. Water and the shoreline are left as they are.
 - include ocean data / ocean floor (m): Water below the water level takes its depth from NOAA's DEM Global Mosaic, which has real depths where the elevation tiles store water as a flat surface, and the ocean floor sets the lowest in-game height allowed. With it off, everything below sea level is clamped to 0 m. The game's lowest minimum height is -100.
 - bit depth: 16-bit grayscale PNG with no alpha channel by default. 8-bit is also available but its height steps are coarse.
@@ -40,20 +44,32 @@ The live values come from a coarse preview of the box. If the full-resolution ex
 
 Water levels can only be found where the elevation data stores water as perfectly flat surfaces. Generally this exists for lakes, reservoirs, rivers and the sea.
 
-Elevation data comes from the [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) open dataset (terrarium encoding, zoom 0-15, no API key). The tiles contain a few known bad patches with wrong values, from single pixels to whole tiles of noise. The export replaces them with the next coarser zoom level's data. Neighboring tiles are sometimes built from different surveys, which leaves straight steps along their shared edges. The export also measures those steps and blends them out.
+Elevation data comes from the [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) open dataset (terrarium encoding, zoom 0-15, no API key). The tiles contain a few known bad patches with wrong values, from single pixels to whole tiles of noise. The export replaces them with the next coarser zoom level's data. Neighboring tiles are sometimes built from different surveys, which can leave straight steps along their shared edges. The export also measures those steps and blends them out.
+
+### Data Sources
+
+- [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) - Base elevation map tiles
+- [OpenStreetMap](https://www.openstreetmap.org) - Reference map overlay
+- [NOAA DEM Global Mosaic](https://www.ncei.noaa.gov/maps-and-geospatial-products) - Bathymetry (underwater elevations)
+- [Esri / Impact Observatory (Sentinel2)](https://ic.imagery1.arcgis.com/arcgis/rest/services/Sentinel2_10m_LandCover/ImageServer) - Land Usage for biome mapping
+- [NextGIS](https://nextgis.com/) - OpenStreetMap's Overpass API data for town data, volcano locations
+    - Backups for overpass provided by [Private.coffee](https://overpass.private.coffee),
+    [Maps.mail.ru](https://maps.mail.ru/osm/tools/overpass/), and [Overpass](https://overpass-api.de/)
 
 ### Publishing
 
 The site is static and is published to GitHub Pages by `.github/workflows/pages.yml` on every push to `main`.
 
-One-time setup: in the repository's Settings, open Pages and set "Source" to "GitHub Actions". After the next push to `main`, or a manual run of the "Publish to GitHub Pages" workflow from the Actions tab, the site is live at https://skyl3lazer.github.io/heightmapper-tf/.
+One-time setup: in the repository's Settings, open Pages and set "Source" to "GitHub Actions". After the next push to `main`, or a manual run of the "Publish to GitHub Pages" workflow from the Actions tab, the site is live at https://skyl3lazer.github.io/heightmapper-tf/ (or your own equivalent).
 
 Town export looks up places through a keyed Overpass service when one is configured, and falls back to the free public Overpass instances otherwise. To configure it, add two environment secrets to the `github-pages` environment (Settings, Environments, github-pages):
 
 - `OVERPASS_URL`: the service URL, with `{key}` where the key goes, e.g. `https://overpass.nextgis.com/{key}/api/interpreter`.
 - `OVERPASS_KEY`: the API key.
 
-The workflow writes them into `config.js` when it publishes. The site has no server, so the published `config.js` is readable by anyone who visits the page. The secrets only keep the key out of the repository.
+The workflow writes them into `config.js` when it publishes. 
+
+**NOTE**: The site has no server, so the published `config.js` is readable by anyone who visits the page. The secrets only keep the key out of the repository. For NextGIS this is intentional.
 
 ### To run locally:
 

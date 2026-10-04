@@ -220,9 +220,10 @@
             <p>A fork of <a href="https://github.com/tangrams/heightmapper" target="_blank">tangrams/heightmapper</a> that exports real-world terrain as heightmaps for Transport Fever 2 and Transport Fever 3.</p>
 
             <p>Usage:</p>
+
             <ol>
             <li>Pick the map size, ratio and orientation in the "heightmap export" panel. The red box in the middle of the view shows the area that will be exported.</li>
-            <li>Pan and zoom until the box covers the region you want. </li>
+            <li>Pan and zoom until the box covers the region you want.</li>
             <li>Customize any generator options such as climate, town count, etc.</li>
             <li>Click "export all" for a zip with the heightmap, biome maps and towns, laid out like the game's user folder. Extract it into <code>%APPDATA%\Transport Fever 3</code>. The individual export buttons save single files instead.</li>
             <li>In the map editor, create a map of the size and climate you've chosen.</li>
@@ -234,12 +235,20 @@
             <p>You now have a fully playable map!</p>
 
             <p>Other controls:</p>
+
             <ul>
             <li>maximum height, minimum height, water level: the values to enter in the game. With auto-exposure on they are measured from the area inside the box, or you can type your own. The game accepts heights from -100 to 3177. Auto-exposure lowers the height scale or steepness just enough to fit the highest point under 3177. It returns to your value when you move somewhere lower. With auto-exposure off, terrain above 3177 is flattened.</li>
             <li>The box label lists the water levels of the flat water surfaces it finds (seas, lakes, reservoirs), largest first, with their area. Transport Fever has a single water level, so pick the one you want and enter it in the game. Auto-exposure picks the largest water body that doesn't flood the entire map, but it's not going to work in every situation.</li>
             <li>climate: the Transport Fever 3 climate the map is for. The box label suggests one from the latitude and land cover inside the box.</li>
-            <li>export biomes: writes <code>&lt;file name&gt;_biomes.png</code> plus the climate's masks for Transport Fever 3's Biomes import, the same size as the heightmap. Temperate gets mountains and rivers, Dry gets coast hills, mesas, monument valley, mountains and rivers, Tropical gets islands, mountains and volcanoes, and Subarctic gets lakes, mountains and swamps. Biomes come from Esri's Sentinel-2 land cover and real-world slope. Browsers may ask to allow multiple downloads the first time.</li>
-            <li>scale by, height scale, steepness: how real heights become in-game heights. Height scale is in-game height per real meter, so 1 keeps real heights. Steepness is how many times steeper than real the slopes come out. The game draws each pixel 4 m wide, so a map covering more real ground than that squeezes the land sideways. "Scale by" lets you switch between modes. Steepness above 4x or so will look weird. Heights scale around sea level, so the sea stays at the water level.</li>
+            <li>export biomes: writes <code>&lt;file name&gt;_biomes.png</code> plus the climate's masks for Transport Fever 3's Biomes import, the same size as the heightmap. Based on climate, this includes:
+                <ul>
+                    <li>temperate: mountains, and rivers</li>
+                    <li>dry: coast hills, mesas, monument valley, mountains, and rivers</li>
+                    <li>tropical: islands, mountains, and volcanoes</li>
+                    <li>subarctic: lakes, mountains, and swamps</li>
+                </ul>
+            </li>
+            <li>scale by, height scale, steepness: how real heights become in-game heights. Height scale is in-game height per real meter, so 1 keeps real heights. Steepness is how many times steeper than real the slopes come out. The game draws each pixel 4 m wide, so a map covering more real ground than that squeezes the land sideways, leading to crazy tall mountains. "Scale by" lets you switch between modes to find whatever you think looks best. Steepness above 4x or so will look weird depending on the region. Heights scale around sea level, so the sea stays at the water level.</li>
             <li>smoothing (in-game m): blurs the land over roughly this distance in the game's own meters, to calm bumpy real-world data. 0 turns it off. Water and the shoreline are left as they are.</li>
             <li>include ocean data / ocean floor (m): Water below the water level takes its depth from NOAA's DEM Global Mosaic, which has real depths where the elevation tiles store water as a flat surface, and the ocean floor sets the lowest in-game height allowed. With it off, everything below sea level is clamped to 0 m. The game's lowest minimum height is -100.</li>
             <li>bit depth: 16-bit grayscale PNG with no alpha channel by default. 8-bit is also available but its height steps are coarse.</li>
@@ -255,7 +264,21 @@
 
             <p>Water levels can only be found where the elevation data stores water as perfectly flat surfaces. Generally this exists for lakes, reservoirs, rivers and the sea.</p>
 
-            <p>Elevation data comes from the <a href="https://registry.opendata.aws/terrain-tiles/" target="_blank">AWS Terrain Tiles</a> open dataset (terrarium encoding, zoom 0-15, no API key). The tiles contain a few known bad patches with wrong values, from single pixels to whole tiles of noise. The export replaces them with the next coarser zoom level's data. Neighboring tiles are sometimes built from different surveys, which leaves straight steps along their shared edges. The export also measures those steps and blends them out.</p>
+            <p>Elevation data comes from the <a href="https://registry.opendata.aws/terrain-tiles/" target="_blank">AWS Terrain Tiles</a> open dataset (terrarium encoding, zoom 0-15, no API key). The tiles contain a few known bad patches with wrong values, from single pixels to whole tiles of noise. The export replaces them with the next coarser zoom level's data. Neighboring tiles are sometimes built from different surveys, which can leave straight steps along their shared edges. The export also measures those steps and blends them out.</p>
+
+            <p>Data Sources:</p>
+
+            <ul>
+            <li><a href="https://registry.opendata.aws/terrain-tiles/" target="_blank">AWS Terrain Tiles</a> - Base elevation map tiles</li>
+            <li><a href="https://www.openstreetmap.org" target="_blank">OpenStreetMap</a> - Reference map overlay</li>
+            <li><a href="https://www.ncei.noaa.gov/maps-and-geospatial-products" target="_blank">NOAA DEM Global Mosaic</a> - Bathymetry (underwater elevations)</li>
+            <li><a href="https://ic.imagery1.arcgis.com/arcgis/rest/services/Sentinel2_10m_LandCover/ImageServer" target="_blank">Esri / Impact Observatory (Sentinel2)</a> - Land Usage for biome mapping</li>
+            <li><a href="https://nextgis.com/" target="_blank">NextGIS</a> - OpenStreetMap's Overpass API data for town data, volcano locations
+                <ul>
+                    <li>Backups for overpass provided by <a href="https://overpass.private.coffee" target="_blank">Private.coffee</a>, <a href="https://maps.mail.ru/osm/tools/overpass/" target="_blank">Maps.mail.ru</a>, and <a href="https://overpass-api.de/" target="_blank">Overpass</a></li>
+                </ul>
+            </li>
+            </ul>
 
             <p>Check out the code on <a href="https://github.com/Skyl3lazer/heightmapper-tf" target="_blank">GitHub</a>.</p>
 
