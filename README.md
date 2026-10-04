@@ -14,7 +14,7 @@ A fork of [tangrams/heightmapper](https://github.com/tangrams/heightmapper) that
 4. Click "export all" for a zip with the heightmap, biome maps and towns, laid out like the game's user folder. Extract it into `%APPDATA%\Transport Fever 3`. The individual export buttons save single files instead.
 5. In the map editor, create a map of the size and climate you've chosen.
 6. In the game's Import Heightmap dialog, enter the "minimum height", "maximum height" and "water level" shown at the top of the panel.
-7. Import the heightmap, biomes, and town files.
+7. Import the heightmap, biomes, and town files. You may want to save+reload the map after importing the biomes to remove the gridlines that the game will generate.
 8. Generate industries.
 
 You now have a fully playable map!
