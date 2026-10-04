@@ -10,7 +10,7 @@ map = (function () {
   var analysisGeneration = 0;
   // What the user typed into whichever of height scale and steepness "scale by" picks. Auto mode may show less so high peaks fit under the game's limit.
   var requestedText = '1';
-  var steepnessWarning, heightScaleHint, climateHint, waterHint, bitDepthHint;
+  var steepnessWarning, heightScaleHint, climateHint, waterHint, bitDepthHint, scaleCapHint;
   var signs = [];
   // The climate follows the analysis's suggestion until the user picks a different one.
   var climateFollows = true;
@@ -195,7 +195,7 @@ map = (function () {
     exportFolder.add(gui, 'ratio', RATIOS).name('ratio').onChange(regionChanged);
     exportFolder.add(gui, 'orientation', ['portrait', 'landscape']).name('orientation').onChange(regionChanged);
     onEdit(exportFolder.add(gui, 'center').name('center (lat, lon)'), applyCenter);
-    onEdit(exportFolder.add(gui, 'metersPerPixel').name('real meters per pixel'), applyScale);
+    scaleCapHint = addSign(onEdit(exportFolder.add(gui, 'metersPerPixel').name('real m/px'), applyScale), 'info');
     exportFolder.add(gui, 'scaleMode', ['height scale', 'steepness', 'max height']).name('scale by').onChange(function(mode) {
       requestedText = {'height scale': gui.heightScale, 'steepness': gui.steepness, 'max height': gui.maxHeight}[mode];
       updateEditable();
@@ -261,13 +261,23 @@ map = (function () {
   }
 
   // Largest rectangle of the output's aspect ratio that fits the map with a margin, in container pixels.
+  // capped: the box would be larger than one copy of the world, so it stops at the world's size instead.
   function exportBoxRect() {
     var size = map.getSize(), out = outputSize();
     var aspect = (out.width - 1) / (out.height - 1);
     var width = size.x * 0.9, height = size.y * 0.9;
     if (width / height > aspect) width = height * aspect;
     else height = width / aspect;
-    return {left: (size.x - width) / 2, top: (size.y - height) / 2, width: width, height: height};
+    var world = map.options.crs.scale(map.getZoom()), capped = width > world || height > world;
+    if (width > world) {
+      width = world;
+      height = width / aspect;
+    }
+    if (height > world) {
+      height = world;
+      width = height * aspect;
+    }
+    return {left: (size.x - width) / 2, top: (size.y - height) / 2, width: width, height: height, capped: capped};
   }
 
   // Projects from the exact center because containerPointToLatLng snaps to Leaflet's whole-pixel origin.
@@ -301,6 +311,7 @@ map = (function () {
     // Steepness mode waits for the analysis, which also fits the scale under the game's limit.
     if (gui.scaleMode == 'height scale' && Number(gui.heightScale) > 0) gui.steepness = steepnessText(Number(gui.heightScale), mpp);
     showSteepnessWarning();
+    showSign(scaleCapHint, r.capped ? "The map is capped at one copy of the world" : null);
     exportFolder.__controllers.forEach(function(c) { c.updateDisplay(); });
     placeBoxLabel();
   }
@@ -434,7 +445,14 @@ map = (function () {
     sign.textContent = SIGN_GLYPHS[kind];
     sign.style.display = 'none';
     sign.kind = kind;
-    sign.field = name.textContent.replace(/\s*\(.*\)$/, '');
+    // The name shortens with an ellipsis when it's long, so the sign after it stays visible.
+    var text = document.createElement('span');
+    text.className = 'field-name';
+    text.textContent = name.textContent;
+    name.textContent = '';
+    name.appendChild(text);
+    name.classList.add('has-sign');
+    sign.field = text.textContent.replace(/\s*\(.*\)$/, '');
     name.appendChild(sign);
     signs.push(sign);
     return sign;
