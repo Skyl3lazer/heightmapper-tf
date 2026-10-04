@@ -108,6 +108,23 @@
             display: none;
         }
 
+        #export-box-label.measuring #export-box-water::before {
+            content: '';
+            display: inline-block;
+            width: 7px;
+            height: 7px;
+            margin-right: 5px;
+            vertical-align: -1px;
+            border: 2px solid rgba(255, 96, 96, .3);
+            border-top-color: #ff6060;
+            border-radius: 50%;
+            animation: measuring-spin .8s linear infinite;
+        }
+
+        @keyframes measuring-spin {
+            to { transform: rotate(360deg); }
+        }
+
         .field-sign.info, #export-box-notices .info {
             color: #80b8ff;
         }
@@ -202,6 +219,11 @@
             color: #ff6060;
             font: 11px 'Lucida Grande', sans-serif;
             white-space: pre;
+        }
+
+        #export-box-label.inside {
+            top: 0;
+            bottom: auto;
         }
 
         .mz-bug-container {

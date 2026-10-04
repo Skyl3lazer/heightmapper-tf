@@ -302,6 +302,7 @@ map = (function () {
     if (gui.scaleMode == 'height scale' && Number(gui.heightScale) > 0) gui.steepness = steepnessText(Number(gui.heightScale), mpp);
     showSteepnessWarning();
     exportFolder.__controllers.forEach(function(c) { c.updateDisplay(); });
+    placeBoxLabel();
   }
 
   // Keeps the real meters per pixel when the latitude changes.
@@ -443,6 +444,7 @@ map = (function () {
       line.className = kind;
       line.textContent = SIGN_GLYPHS[kind] + ' ' + fields.join(', ');
     });
+    placeBoxLabel();
   }
 
   function showSteepnessWarning() {
@@ -525,11 +527,20 @@ map = (function () {
 
   function setBoxWater(text) {
     document.getElementById('export-box-water').textContent = text;
+    placeBoxLabel();
+  }
+
+  // The label sits above the box, or just inside its top edge when the rows above it would leave the screen.
+  function placeBoxLabel() {
+    var label = document.getElementById('export-box-label');
+    label.classList.remove('inside');
+    if (label.offsetHeight > document.getElementById('export-box').offsetTop) label.classList.add('inside');
   }
 
   // The notice rows describe the last analysis, so they hide while a new one runs.
   function setMeasuring(on) {
     document.getElementById('export-box-label').classList.toggle('measuring', on);
+    placeBoxLabel();
   }
 
   var scheduleAnalysis = debounce(runAnalysis, 300);
