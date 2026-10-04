@@ -19,11 +19,25 @@ var townExport = (function () {
     return count > 0 ? count : DEFAULT_POPULATION[tags.place];
   }
 
-  // The game's own town names are plain ASCII, so accents are dropped rather than risked.
-  function asciiName(tags) {
-    return String(tags.name || tags['name:en'] || '')
-      .normalize('NFD').replace(/[̀-ͯ]/g, '')
-      .replace(/[^\x20-\x7e]/g, '').trim();
+  // Cyrillic and Greek spell out letter by letter, for places with no Latin name at all.
+  const TRANSLIT = {'\u0430': 'a', '\u0431': 'b', '\u0432': 'v', '\u0433': 'g', '\u0434': 'd', '\u0435': 'e', '\u0451': 'yo', '\u0436': 'zh', '\u0437': 'z', '\u0438': 'i', '\u0439': 'y', '\u043a': 'k', '\u043b': 'l', '\u043c': 'm', '\u043d': 'n', '\u043e': 'o', '\u043f': 'p', '\u0440': 'r', '\u0441': 's', '\u0442': 't', '\u0443': 'u', '\u0444': 'f', '\u0445': 'kh', '\u0446': 'ts', '\u0447': 'ch', '\u0448': 'sh', '\u0449': 'shch', '\u044a': '', '\u044b': 'y', '\u044c': '', '\u044d': 'e', '\u044e': 'yu', '\u044f': 'ya', '\u0456': 'i', '\u0457': 'yi', '\u0454': 'ye', '\u0491': 'g', '\u045e': 'u', '\u0458': 'j', '\u0459': 'lj', '\u045a': 'nj', '\u045b': 'c', '\u0452': 'dj', '\u045f': 'dz', '\u0453': 'g', '\u045c': 'k', '\u0455': 'dz', '\u03b1': 'a', '\u03b2': 'v', '\u03b3': 'g', '\u03b4': 'd', '\u03b5': 'e', '\u03b6': 'z', '\u03b7': 'i', '\u03b8': 'th', '\u03b9': 'i', '\u03ba': 'k', '\u03bb': 'l', '\u03bc': 'm', '\u03bd': 'n', '\u03be': 'x', '\u03bf': 'o', '\u03c0': 'p', '\u03c1': 'r', '\u03c3': 's', '\u03c2': 's', '\u03c4': 't', '\u03c5': 'y', '\u03c6': 'f', '\u03c7': 'ch', '\u03c8': 'ps', '\u03c9': 'o', '\u03ac': 'a', '\u03ad': 'e', '\u03ae': 'i', '\u03af': 'i', '\u03cc': 'o', '\u03cd': 'y', '\u03ce': 'o', '\u03ca': 'i', '\u03cb': 'y', '\u0390': 'i', '\u03b0': 'y'};
+
+  // Names in Latin script, accents included. Combining marks and anything that isn't a letter are fine.
+  function isLatin(text) {
+    return /^[\p{Script=Latin}\P{L}]*$/u.test(text) && /\p{L}/u.test(text);
+  }
+
+  // The local name when it's already Latin, then English and international names, then romanizations, then transliteration.
+  function latinName(tags) {
+    const keys = ['name', 'name:en', 'int_name'].concat(Object.keys(tags).filter(k => /^name:[a-z]+[-_](Latn|rm)/i.test(k)));
+    const key = keys.find(k => tags[k] && isLatin(tags[k]));
+    const spelled = String(tags.name || '').replace(/./gu, c => {
+      const latin = TRANSLIT[c.toLowerCase()];
+      if (latin === undefined) return c;
+      return c === c.toLowerCase() ? latin : latin.charAt(0).toUpperCase() + latin.slice(1);
+    });
+    const name = key ? tags[key] : isLatin(spelled) ? spelled : '';
+    return name.replace(/\s+/g, ' ').trim();
   }
 
   function hash(text) {
@@ -60,7 +74,7 @@ var townExport = (function () {
   }
 
   async function build(options) {
-    const {bounds, width, height, maxTowns, minSpacing, includeVillages, northLeft} = options;
+    const {bounds, width, height, maxTowns, minSpacing, includeVillages, originalNames, northLeft} = options;
     const onStage = options.onStage || function () {};
     const nw = heightmapExport.project(bounds.north, bounds.west);
     const se = heightmapExport.project(bounds.south, bounds.east);
@@ -73,7 +87,7 @@ var townExport = (function () {
     for (const [tag, plural] of includeVillages ? PLACE_TIERS : PLACE_TIERS.slice(0, 2)) {
       onStage('Looking up ' + plural + '...');
       for (const place of await overpass.nodes(bounds, `["place"="${tag}"]`)) {
-        const name = asciiName(place.tags);
+        const name = originalNames ? String(place.tags.name || '').trim() : latinName(place.tags);
         if (!name) continue;
         // OpenStreetMap longitudes stay within -180 to 180, so they move to the copy of the world the box is in.
         const lon = place.lon + 360 * Math.round((centerLng - place.lon) / 360);

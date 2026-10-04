@@ -221,9 +221,11 @@ map = (function () {
     gui.maxTowns = 65;
     gui.townSpacing = 1200;
     gui.includeVillages = true;
+    gui.townNames = 'latin alphabet';
     townFolder.add(gui, 'maxTowns', 1, 300).step(1).name('max towns');
     townFolder.add(gui, 'townSpacing', 0, 5000).step(50).name('min town spacing (m)');
     townFolder.add(gui, 'includeVillages').name('include villages');
+    townFolder.add(gui, 'townNames', ['latin alphabet', 'original']).name('town names');
     gui.exportTowns = function () { exportTowns(); };
     townFolder.add(gui, 'exportTowns').name('export towns');
     townFolder.open();
@@ -858,7 +860,7 @@ map = (function () {
       name: exportName(), mapName: mapName(), climate: gui.climate, bitDepth: Number(gui.bitDepth), smoothing: gui.smoothing,
       auto: gui.autoexpose, oceans: gui.include_oceans, oceanFloor: needsHeights ? oceanFloor() : 0,
       request: needsHeights ? scaleRequest() : null, heights: needsHeights ? readHeights() : null, analysis: analysis,
-      towns: {maxTowns: Math.round(gui.maxTowns), minSpacing: Number(gui.townSpacing), includeVillages: gui.includeVillages},
+      towns: {maxTowns: Math.round(gui.maxTowns), minSpacing: Number(gui.townSpacing), includeVillages: gui.includeVillages, originalNames: gui.townNames == 'original'},
       view: viewKey()
     };
   }

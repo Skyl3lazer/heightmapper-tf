@@ -33,6 +33,7 @@ You now have a fully playable map!
 - smoothing (in-game m): blurs the land over roughly this distance in the game's own meters, to calm bumpy real-world data. 0 turns it off. Water and the shoreline are left as they are.
 - include ocean data / ocean floor (m): Water below the water level takes its depth from NOAA's DEM Global Mosaic, which has real depths where the elevation tiles store water as a flat surface, and the ocean floor sets the lowest in-game height allowed. With it off, everything below sea level is clamped to 0 m. The game's lowest minimum height is -100.
 - bit depth: 16-bit grayscale PNG with no alpha channel by default. 8-bit is also available but its height steps are coarse.
+- town names: take latin-character only names or the original accented/character names.
 - export all: runs the heightmap, biome and town exports and saves them together as `<file name>.zip`.
 - reference map: overlays OpenStreetMap for finding places.
 - screenshot: saves the current view as an 8-bit image for testing.
