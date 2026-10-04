@@ -297,6 +297,28 @@ map = (function () {
     return {west: nw.lng, north: nw.lat, east: se.lng, south: se.lat};
   }
 
+  // World pixels to move the box down by to keep it inside the world, centered when it can't fit.
+  function boxOverflow(boxTop, height) {
+    var world = map.options.crs.scale(map.getZoom());
+    if (height >= world) return (world - height) / 2 - boxTop;
+    return Math.min(Math.max(boxTop, 0), world - height) - boxTop;
+  }
+
+  // Web Mercator stops at about 85 degrees north and south. There is no terrain past it.
+  function keepBoxInWorld() {
+    var zoom = map.getZoom(), r = exportBoxRect();
+    var center = map.project(map.getCenter(), zoom);
+    var shift = boxOverflow(center.y - r.height / 2, r.height);
+    // A reset keeps the exact center. Without it Leaflet pans by whole screen pixels.
+    if (Math.abs(shift) > 0.01) map.setView(map.unproject([center.x, center.y + shift], zoom), zoom, {reset: true});
+  }
+
+  // Leaflet's maxBounds limits the whole view, not a box inside it, so drags are limited here.
+  function limitDrag() {
+    var r = exportBoxRect();
+    this._newPos.y -= boxOverflow(r.top - this._newPos.y + map.getPixelOrigin().y, r.height);
+  }
+
   function metersPerPixel() {
     return heightmapExport.groundWidth(exportBounds()) / (outputSize().width - 1);
   }
@@ -335,7 +357,19 @@ map = (function () {
     var mpp = metersPerPixel();
     // A reset keeps the exact center. Without it Leaflet pans by whole screen pixels.
     map.setView(c, map.getZoom(), {reset: true});
-    map.setView(c, map.getZoom() + Math.log2(metersPerPixel() / mpp), {reset: true});
+    zoomToScale(c, mpp);
+  }
+
+  // Near a pole the box limit moves the center, which shifts the scale. One zoom step can't settle both.
+  function zoomToScale(center, target) {
+    var zoom = map.getZoom(), error = Math.log2(metersPerPixel() / target), slope = -1;
+    for (var i = 0; i < 20 && Math.abs(error) > 1e-9; i++) {
+      map.setView(center, zoom - error / slope, {reset: true});
+      var nextZoom = map.getZoom(), nextError = Math.log2(metersPerPixel() / target);
+      if (nextZoom != zoom) slope = Math.min(-1, (nextError - error) / (nextZoom - zoom));
+      zoom = nextZoom;
+      error = nextError;
+    }
   }
 
   function applyScale() {
@@ -345,7 +379,7 @@ map = (function () {
       return;
     }
     showInputError(null);
-    map.setView(map.getCenter(), map.getZoom() + Math.log2(metersPerPixel() / target), {reset: true});
+    zoomToScale(map.getCenter(), target);
   }
   
   function regionChanged() {
@@ -1172,7 +1206,10 @@ map = (function () {
       });
 
       if (startAtDefaults) applyScale();
+      keepBoxInWorld();
       updateExportBox();
+      map.on('moveend', keepBoxInWorld);
+      map.dragging._draggable.on('predrag', limitDrag);
       map.on('move zoom resize', updateExportBox);
       map.on('moveend zoomend resize', scheduleAnalysis);
       runAnalysis();
