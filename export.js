@@ -25,6 +25,24 @@ var heightmapExport = (function () {
   const PNG_CHUNK = 1 << 20;
   // Impact Observatory land cover classes.
   const LC_NO_DATA = 0, LC_WATER = 1, LC_TREES = 2, LC_FLOODED = 4, LC_BARE = 8, LC_SNOW = 9, LC_CLOUDS = 10;
+  // Water normalization. Smaller water bodies would pin the land around them to the water level.
+  const NORMALIZE_MIN_KM2 = 0.5;
+  // In-game meters. Higher water bodies would need a crater around them, so they stay dry.
+  const NORMALIZE_MAX_LIFT = 100;
+  // The steepest slope normalization adds to land in game, and the slope of the beds it lays below the shore.
+  const NORMALIZE_GRADE = 0.1;
+  // In-game meters. Rivers lowered by different amounts meet in a seam, which a blur this wide turns into a slope.
+  const NORMALIZE_SEAM = 200;
+  // Real meters a lowered surface may still sit above the level and count as water, for survey steps along a river.
+  const NORMALIZE_SURFACE_TOLERANCE = 2;
+  // Real meters mapped water that needs no lowering may sit above the level and still be filled. Tidal channels often survey this high.
+  const LEVEL_WATER_TOLERANCE = 3;
+  // Real meters above such a channel's own surface that still count as its water, which keeps its banks dry.
+  const CHANNEL_SURFACE_TOLERANCE = 0.5;
+  // In-game meters.
+  const BED_MAX_DEPTH = 10;
+  // Rows of a full-size grid between progress reports, each a moment the page can repaint.
+  const ROW_BATCH = 256;
   // Transport Fever 3 writes biomes 0 to 4 as these gray levels.
   const BIOME_GRAY = [0, 63, 127, 191, 255];
   const GAME_METERS_PER_PIXEL = 4;
@@ -605,7 +623,8 @@ var heightmapExport = (function () {
 
   // Cells at or below submerge.level take NOAA depths, and every one ends at or below submerge.top so it sits under the water.
   // onProgress(fraction): as for fetchImageServer.
-  async function applyBathymetry(heights, width, height, region, submerge, onProgress) {
+  // lowered: optional, cells water normalization lowered. Their NOAA values describe the old height, so they are left for layBeds.
+  async function applyBathymetry(heights, width, height, region, submerge, onProgress, lowered) {
     const {level, top} = submerge;
     if (!heights.some(h => h <= level)) return 'no water below the water level';
     const {width: bw, height: bh} = rasterSize(width, height);
@@ -621,7 +640,7 @@ var heightmapExport = (function () {
       const v = j * fy, r = Math.min(Math.floor(v), bh - 2), ty = v - r;
       for (let i = 0; i < width; i++) {
         const k = j * width + i;
-        if (heights[k] > level) continue;
+        if (heights[k] > level || (lowered && lowered[k])) continue;
         let d = NaN;
         if (depth) {
           const u = i * fx, c = Math.min(Math.floor(u), bw - 2), tx = u - c;
@@ -715,33 +734,36 @@ var heightmapExport = (function () {
   }
 
   // Two-pass chamfer distance, in cells, from every cell to the nearest one where source is set.
-  function distanceTo(source, width, height) {
+  // values: optional, rewritten in place so every cell holds the value of the source cell nearest it.
+  function distanceTo(source, width, height, values) {
     const d = new Float32Array(width * height);
     for (let i = 0; i < d.length; i++) d[i] = source[i] ? 0 : Infinity;
+    const relax = (i, j, step) => {
+      if (d[j] + step < d[i]) {
+        d[i] = d[j] + step;
+        if (values) values[i] = values[j];
+      }
+    };
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
         const i = y * width + x;
-        let v = d[i];
-        if (x > 0) v = Math.min(v, d[i - 1] + 1);
+        if (x > 0) relax(i, i - 1, 1);
         if (y > 0) {
-          v = Math.min(v, d[i - width] + 1);
-          if (x > 0) v = Math.min(v, d[i - width - 1] + Math.SQRT2);
-          if (x < width - 1) v = Math.min(v, d[i - width + 1] + Math.SQRT2);
+          relax(i, i - width, 1);
+          if (x > 0) relax(i, i - width - 1, Math.SQRT2);
+          if (x < width - 1) relax(i, i - width + 1, Math.SQRT2);
         }
-        d[i] = v;
       }
     }
     for (let y = height - 1; y >= 0; y--) {
       for (let x = width - 1; x >= 0; x--) {
         const i = y * width + x;
-        let v = d[i];
-        if (x < width - 1) v = Math.min(v, d[i + 1] + 1);
+        if (x < width - 1) relax(i, i + 1, 1);
         if (y < height - 1) {
-          v = Math.min(v, d[i + width] + 1);
-          if (x < width - 1) v = Math.min(v, d[i + width + 1] + Math.SQRT2);
-          if (x > 0) v = Math.min(v, d[i + width - 1] + Math.SQRT2);
+          relax(i, i + width, 1);
+          if (x < width - 1) relax(i, i + width + 1, Math.SQRT2);
+          if (x > 0) relax(i, i + width - 1, Math.SQRT2);
         }
-        d[i] = v;
       }
     }
     return d;
@@ -1015,8 +1037,9 @@ var heightmapExport = (function () {
 
   // Heights in meters for the output pixels within radius of (px, py), north up, a square 2 radius + 1 wide.
   // terrain: the heights render returned for this output, read instead of fetching. smoothing and level: as for render.
+  // plan: a water normalization plan for fetched patches, which render has already applied to terrain.
   async function terrainPatch(bounds, width, height, px, py, radius, options) {
-    const {terrain, smoothing, level} = options;
+    const {terrain, smoothing, level, plan} = options;
     const size = 2 * radius + 1;
     if (terrain) {
       const heights = new Float32Array(size * size);
@@ -1034,6 +1057,7 @@ var heightmapExport = (function () {
     const patch = {x0: region.x0 + (px - reach) * dx, x1: region.x0 + (px + reach) * dx, y0: region.y0 + (py - reach) * dy, y1: region.y0 + (py + reach) * dy};
     // Sampled exactly as render samples the map, so this is the terrain in the heightmap.
     const heights = await sampleRegion(patch, full, full, pickZoom(region.x1 - region.x0, width, 2), function () {});
+    if (plan) await applyWaterPlan(plan, heights, full, full, px - reach, py - reach, width, height);
     if (!pad) return heights;
     await smoothLand(heights, full, full, smoothing, level);
     const out = new Float32Array(size * size);
@@ -1041,12 +1065,254 @@ var heightmapExport = (function () {
     return out;
   }
 
+  // Plans water normalization on a gw x gh grid: how far to lower each cell so rivers and lakes above the water level reach it.
+  // heights and cover: real meters and land cover classes on the grid. cellMeters and gameCell: real and in-game meters per cell.
+  // level: real meters the water should end at. Returns null when there is no water to work from.
+  // rivers: optional, river courses on the grid. Land cover misses rivers narrower than its 10 m cells can see.
+  async function planWater(heights, cover, gw, gh, cellMeters, gameCell, scale, level, rivers) {
+    const n = gw * gh;
+    const water = new Uint8Array(n);
+    for (let i = 0; i < n; i++) if (cover[i] === LC_WATER || (rivers && rivers[i])) water[i] = 1;
+    // Trees and bridges break rivers into pieces, so pieces two cells apart count as one water body.
+    const {labels, count} = label(distanceTo(water, gw, gh).map(d => d <= 2 ? 1 : 0), gw, gh);
+    const cells = new Float64Array(count + 1);
+    for (let i = 0; i < n; i++) if (water[i]) cells[labels[i]]++;
+    const minCells = NORMALIZE_MIN_KM2 * 1e6 / (cellMeters * cellMeters);
+    // The lowest water neighbor keeps bank cells out of the surface, then a blur along the water evens out survey steps.
+    // A river course only marks where the river runs, so its surface is the lowest ground right around it.
+    const sum = new Float32Array(n), weight = new Float32Array(n);
+    for (let y = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++) {
+        const i = y * gw + x;
+        if (!water[i] || cells[labels[i]] < minCells) continue;
+        let low = heights[i];
+        for (let v = Math.max(0, y - 1); v <= Math.min(gh - 1, y + 1); v++) {
+          for (let u = Math.max(0, x - 1); u <= Math.min(gw - 1, x + 1); u++) {
+            if (water[v * gw + u] || (rivers && rivers[i])) low = Math.min(low, heights[v * gw + u]);
+          }
+        }
+        sum[i] = low;
+        weight[i] = 1;
+      }
+    }
+    const kept = weight.slice();
+    const {r, share} = boxKernel(3);
+    for (let pass = 0; pass < 3; pass++) {
+      boxSum(sum, gw, gh, r, share);
+      boxSum(weight, gw, gh, r, share);
+    }
+    const surface = new Float32Array(n);
+    let any = false;
+    for (let i = 0; i < n; i++) {
+      if (!kept[i]) continue;
+      surface[i] = sum[i] / weight[i];
+      any = true;
+    }
+    if (!any) return null;
+
+    const guard = 1 / scale, maxLift = NORMALIZE_MAX_LIFT / scale;
+    const lift = new Float32Array(n), lowered = new Uint8Array(n), atLevel = new Uint8Array(n);
+    // The limit goes cell by cell, so a river climbing into hills still fills its lower reaches. A lake is flat, so it fills or stays dry whole.
+    const bodies = new Uint8Array(count + 1);
+    let deepest = 0;
+    for (let i = 0; i < n; i++) {
+      if (!kept[i]) continue;
+      if (surface[i] - level > maxLift) {
+        kept[i] = 0;
+        bodies[labels[i]] |= 4;
+        continue;
+      }
+      lift[i] = Math.max(0, surface[i] - level);
+      if (lift[i] > guard) lowered[i] = 1;
+      else atLevel[i] = 1;
+      bodies[labels[i]] |= lowered[i] ? 2 : 1;
+      deepest = Math.max(deepest, lift[i] * scale);
+    }
+    const stats = {lowered: bodies.filter(b => b & 2).length, skipped: bodies.filter(b => b === 4).length, deepest: deepest};
+    // Water at the level that surveys a little above it, like a tidal channel, has its own flat surface, which draws its shoreline.
+    // The middle of its neighbors skips bank samples. Water at or below the level stays out of it.
+    const channelSum = new Float32Array(n), channelWeight = new Float32Array(n), near = [];
+    for (let y = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++) {
+        const i = y * gw + x;
+        if (!atLevel[i] || !(heights[i] > level)) continue;
+        near.length = 0;
+        for (let v = Math.max(0, y - 1); v <= Math.min(gh - 1, y + 1); v++) {
+          for (let u = Math.max(0, x - 1); u <= Math.min(gw - 1, x + 1); u++) {
+            const j = v * gw + u;
+            if (atLevel[j] && heights[j] > level && heights[j] <= level + LEVEL_WATER_TOLERANCE) near.push(heights[j]);
+          }
+        }
+        if (!near.length) continue;
+        near.sort((p, q) => p - q);
+        channelSum[i] = near[near.length >> 1];
+        channelWeight[i] = 1;
+      }
+    }
+    const channel = new Float32Array(n).fill(NaN), hasChannel = channelWeight.slice();
+    const k2 = boxKernel(2);
+    for (let pass = 0; pass < 3; pass++) {
+      boxSum(channelSum, gw, gh, k2.r, k2.share);
+      boxSum(channelWeight, gw, gh, k2.r, k2.share);
+    }
+    for (let i = 0; i < n; i++) if (hasChannel[i]) channel[i] = channelSum[i] / channelWeight[i];
+
+    // Water that needs no lowering, like the sea, also holds the land beside it where it is.
+    const distance = distanceTo(kept, gw, gh, lift);
+    const offset = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      if (!(lift[i] > 0)) continue;
+      // The fade lengthens with the lift, so the slope it adds to the land stays under NORMALIZE_GRADE in game.
+      const t = Math.max(0, 1 - distance[i] * gameCell * NORMALIZE_GRADE / (lift[i] * scale));
+      offset[i] = lift[i] * t * t * (3 - 2 * t);
+    }
+    // Seams sit away from the water, so the blur fades out toward the water, which keeps its full lowering.
+    const exact = offset.slice();
+    await smoothLand(offset, gw, gh, NORMALIZE_SEAM / gameCell, -Infinity);
+    for (let i = 0; i < n; i++) {
+      const w = Math.max(0, 1 - distance[i] * gameCell / (2 * NORMALIZE_SEAM));
+      offset[i] = exact[i] * w + offset[i] * (1 - w);
+    }
+    return {offset: offset, lowered: lowered, channel: channel, level: level, guard: guard, gw: gw, gh: gh, stats: stats};
+  }
+
+  // Fetches land cover and plans water normalization for an output. heights: real meters for the whole output, or null to fetch coarser ones.
+  // onStage(stage, fraction): reports the downloads. rivers: optional, river courses as [[lat, lon], ...] lines.
+  async function planWaterFor(region, width, height, heights, scale, level, onStage, rivers) {
+    const {width: gw, height: gh} = rasterSize(width, height);
+    let coarse;
+    if (heights) {
+      coarse = new Float32Array(gw * gh);
+      for (let j = 0; j < gh; j++) {
+        const row = Math.round(j * (height - 1) / (gh - 1)) * width;
+        for (let i = 0; i < gw; i++) coarse[j * gw + i] = heights[row + Math.round(i * (width - 1) / (gw - 1))];
+      }
+    } else {
+      onStage('Fetching elevation tiles...', 0);
+      coarse = await sampleRegion(region, gw, gh, pickZoom(region.x1 - region.x0, gw, 1), f => onStage('Fetching elevation tiles...', f));
+    }
+    onStage('Fetching land cover...');
+    const cover = await fetchImageServer(LANDCOVER_URL, region, gw, gh, 'U8', 'RSP_NearestNeighbor', f => onStage('Fetching land cover...', f));
+    return planWater(coarse, cover, gw, gh, groundWidth(region) / (gw - 1), GAME_METERS_PER_PIXEL * (width - 1) / (gw - 1), scale, level,
+      rivers ? riverCells(rivers, region, gw, gh) : null);
+  }
+
+  // Draws river courses, [[lat, lon], ...] lines, onto a gw x gh grid over region.
+  function riverCells(rivers, region, gw, gh) {
+    const cells = new Uint8Array(gw * gh);
+    const centerLng = xToLng((region.x0 + region.x1) / 2);
+    // OpenStreetMap longitudes stay within -180 to 180, so they move to the copy of the world the region is in.
+    const gx = lng => (lngToX(lng + 360 * Math.round((centerLng - lng) / 360)) - region.x0) / (region.x1 - region.x0) * (gw - 1);
+    const gy = lat => (latToY(lat) - region.y0) / (region.y1 - region.y0) * (gh - 1);
+    for (const line of rivers) {
+      for (let p = 1; p < line.length; p++) {
+        const ax = gx(line[p - 1][1]), ay = gy(line[p - 1][0]), bx = gx(line[p][1]), by = gy(line[p][0]);
+        const steps = Math.ceil(2 * Math.max(Math.abs(bx - ax), Math.abs(by - ay))) + 1;
+        for (let s = 0; s <= steps; s++) {
+          const x = Math.round(ax + (bx - ax) * s / steps), y = Math.round(ay + (by - ay) * s / steps);
+          if (x >= 0 && y >= 0 && x < gw && y < gh) cells[y * gw + x] = 1;
+        }
+      }
+    }
+    return cells;
+  }
+
+  // Lowers a grid by a plan and sets the water it lowered to the plan's level. Returns which cells that water covers.
+  // The grid covers output pixels x0 to x0 + width - 1 and y0 to y0 + height - 1 of an output outputWidth x outputHeight.
+  // onProgress(fraction): optional, called every ROW_BATCH rows, and awaited.
+  async function applyWaterPlan(plan, heights, width, height, x0, y0, outputWidth, outputHeight, onProgress) {
+    const {offset, lowered, channel, level, guard, gw, gh} = plan;
+    const sx = (gw - 1) / (outputWidth - 1), sy = (gh - 1) / (outputHeight - 1);
+    const lifted = new Uint8Array(width * height);
+    for (let j = 0; j < height; j++) {
+      const v = Math.min(gh - 1, Math.max(0, (y0 + j) * sy)), r = Math.min(Math.floor(v), gh - 2), fy = v - r;
+      for (let i = 0; i < width; i++) {
+        const u = Math.min(gw - 1, Math.max(0, (x0 + i) * sx)), c = Math.min(Math.floor(u), gw - 2), fx = u - c, a = r * gw + c;
+        const k = j * width + i, before = heights[k];
+        heights[k] -= (offset[a] * (1 - fx) + offset[a + 1] * fx) * (1 - fy) + (offset[a + gw] * (1 - fx) + offset[a + gw + 1] * fx) * fy;
+        // The coarse land cover picks out the water. The full-resolution surface draws its exact shoreline.
+        if ((lowered[a] || lowered[a + 1] || lowered[a + gw] || lowered[a + gw + 1]) && heights[k] <= level + NORMALIZE_SURFACE_TOLERANCE) {
+          heights[k] = level;
+          lifted[k] = 1;
+        } else if (heights[k] > level && heights[k] <= level + LEVEL_WATER_TOLERANCE && heights[k] <= channelSurface(channel, a, gw, fx, fy) + CHANNEL_SURFACE_TOLERANCE) {
+          // NOAA still gives these their beds.
+          heights[k] = level;
+        } else if (before > level + guard && heights[k] < level + guard) {
+          heights[k] = level + guard;
+        }
+      }
+      if (onProgress && j % ROW_BATCH === ROW_BATCH - 1) await onProgress((j + 1) / height);
+    }
+    return lifted;
+  }
+
+  // A channel's surface between the four plan cells around a pixel, from the ones that have one, or NaN.
+  function channelSurface(channel, a, gw, fx, fy) {
+    let sum = 0, weight = 0;
+    const corners = [[a, (1 - fx) * (1 - fy)], [a + 1, fx * (1 - fy)], [a + gw, (1 - fx) * fy], [a + gw + 1, fx * fy]];
+    for (const [c, w] of corners) {
+      if (channel[c] === channel[c]) {
+        sum += channel[c] * w;
+        weight += w;
+      }
+    }
+    return weight > 0 ? sum / weight : NaN;
+  }
+
+  // Lays an estimated bed under water the data gives no depth for, since elevation data only records a water surface.
+  // That is water normalization lowered, and water applyBathymetry left at its flat top. The bed deepens from the shore.
+  // submerge: as for applyBathymetry. gameCell: in-game meters per cell. Returns how many cells got a bed.
+  // onProgress(fraction): optional, called every ROW_BATCH rows of each pass, and awaited.
+  async function layBeds(heights, width, height, submerge, lowered, gameCell, scale, onProgress) {
+    const {level, top} = submerge, flat = Math.fround(top);
+    // Chamfer distance to the shore in thirds of a cell, which reaches past the deepest bed.
+    const d = new Uint8Array(heights.length);
+    for (let i = 0; i < d.length; i++) d[i] = heights[i] <= level ? 255 : 0;
+    let beds = 0;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x;
+        if (!d[i]) continue;
+        let v = d[i];
+        if (x > 0) v = Math.min(v, d[i - 1] + 3);
+        if (y > 0) {
+          v = Math.min(v, d[i - width] + 3);
+          if (x > 0) v = Math.min(v, d[i - width - 1] + 4);
+          if (x < width - 1) v = Math.min(v, d[i - width + 1] + 4);
+        }
+        d[i] = v;
+      }
+      if (onProgress && y % ROW_BATCH === ROW_BATCH - 1) await onProgress((y + 1) / (2 * height));
+    }
+    for (let y = height - 1; y >= 0; y--) {
+      for (let x = width - 1; x >= 0; x--) {
+        const i = y * width + x;
+        if (!d[i]) continue;
+        let v = d[i];
+        if (x < width - 1) v = Math.min(v, d[i + 1] + 3);
+        if (y < height - 1) {
+          v = Math.min(v, d[i + width] + 3);
+          if (x < width - 1) v = Math.min(v, d[i + width + 1] + 4);
+          if (x > 0) v = Math.min(v, d[i + width - 1] + 4);
+        }
+        d[i] = v;
+        if ((lowered && lowered[i]) || heights[i] === flat) {
+          heights[i] = Math.min(heights[i], top - Math.min(BED_MAX_DEPTH, NORMALIZE_GRADE * gameCell * v / 3) / scale);
+          beds++;
+        }
+      }
+      if (onProgress && y % ROW_BATCH === 0) await onProgress((2 * height - y) / (2 * height));
+    }
+    return beds;
+  }
+
   // Coarse pass for live feedback: extremes and water surfaces, without fetching full-resolution tiles.
   // limits(peak): given the highest point in meters, the {floor, ceiling} in meters that heights are clamped into.
   // submerge(water, floodShare, areaKm2): given the water surfaces found, the {level, top} in meters for applyBathymetry, or null.
   // smoothing: as for render, in pixels of an image outputWidth wide.
+  // normalizeWater(water, floodShare, areaKm2): given the water surfaces found, the real height rivers and lakes above it are lowered to, or null.
   async function analyze(options) {
-    const {bounds, aspect, limits, submerge, smoothing, outputWidth} = options;
+    const {bounds, aspect, limits, submerge, smoothing, outputWidth, normalizeWater} = options;
     const region = boundsToRegion(bounds);
     const width = Math.max(2, Math.round(PREVIEW_SIZE * Math.min(1, aspect)));
     const height = Math.max(2, Math.round(PREVIEW_SIZE * Math.min(1, 1 / aspect)));
@@ -1060,19 +1326,29 @@ var heightmapExport = (function () {
       cover = null;
     }
     const peak = highest(heights);
-    const {floor, ceiling} = limits(peak);
+    const {floor, ceiling, scale} = limits(peak);
+    const cellSize = groundWidth(region) / (width - 1), gameCell = GAME_METERS_PER_PIXEL * (outputWidth - 1) / (width - 1);
     let extremes = clampAndMeasure(heights, floor, ceiling);
-    const cellSize = groundWidth(region) / (width - 1);
     const {surfaces: water, floodShare} = findWaterSurfaces(heights, width, height, cellSize * cellSize, floor, ceiling, cover);
     const areaKm2 = width * height * cellSize * cellSize / 1e6;
     const sea = submerge ? submerge(water, floodShare, areaKm2) : null;
+    // The level comes from the map as it is, so lowering water onto it can't change which level that is.
+    const surface = normalizeWater && cover ? normalizeWater(water, floodShare, areaKm2) : null;
+    let plan = null, lifted = null;
+    if (surface !== null && isFinite(surface)) {
+      plan = await planWater(heights, cover, width, height, cellSize, gameCell, scale, surface);
+      if (plan) lifted = await applyWaterPlan(plan, heights, width, height, 0, 0, width, height);
+    }
     let bathymetry = null;
-    if (sea) bathymetry = await applyBathymetry(heights, width, height, region, sea);
+    if (sea) {
+      bathymetry = await applyBathymetry(heights, width, height, region, sea, null, lifted);
+      await layBeds(heights, width, height, sea, lifted, gameCell, scale);
+    }
     if (smoothing) await smoothLand(heights, width, height, smoothing * (width - 1) / (outputWidth - 1), sea ? sea.level : -Infinity);
-    if (sea || smoothing) extremes = clampAndMeasure(heights, floor, ceiling);
+    if (sea || smoothing || lifted) extremes = clampAndMeasure(heights, floor, ceiling);
     return {
       min: extremes.lo, max: extremes.hi, peak: peak, groundWidth: groundWidth(region), areaKm2: areaKm2,
-      water: water, floodShare: floodShare, bathymetry: bathymetry,
+      water: water, floodShare: floodShare, bathymetry: bathymetry, normalized: plan ? plan.stats : null,
       landCover: landCover, centerLat: yToLat((region.y0 + region.y1) / 2)
     };
   }
@@ -1080,22 +1356,49 @@ var heightmapExport = (function () {
   // limits(peak): as for analyze. range(lo, hi): given the clamped data's extremes in meters, returns the {min, max} that map to black and white.
   // submerge: the {level, top} in meters for applyBathymetry, or null. smoothing: the blur's sigma in pixels, or 0.
   // waterLevel: meters, anything at or below it stays out of the smoothing.
+  // normalizeWater: lower rivers and lakes onto the water surface limits gives, in real meters as waterSurface.
+  // rivers: optional, river courses as [[lat, lon], ...] lines for normalization.
   // width and height are the region's, north up. northLeft turns the image a quarter left.
   async function render(options) {
-    const {bounds, width, height, bitDepth, range, limits, submerge, smoothing, waterLevel, northLeft} = options;
+    const {bounds, width, height, bitDepth, range, limits, submerge, smoothing, waterLevel, northLeft, normalizeWater, rivers} = options;
     const onProgress = options.onProgress || function () {};
     const onStage = options.onStage || function () {};
     const region = boundsToRegion(bounds);
     const zoom = pickZoom(region.x1 - region.x0, width, 2);
 
     const heights = await sampleRegion(region, width, height, zoom, onProgress);
+    // limits sees the peak before normalization and smoothing, the same one the preview measures.
+    const peak = highest(heights);
+    const {floor, ceiling, scale, waterSurface} = limits(peak);
+    let normalized = null, lifted = null;
+    if (normalizeWater && isFinite(waterSurface)) {
+      try {
+        const plan = await planWaterFor(region, width, height, heights, scale, waterSurface, onStage, rivers);
+        if (plan) {
+          onStage('Normalizing water...', 0);
+          await yieldToPage();
+          lifted = await applyWaterPlan(plan, heights, width, height, 0, 0, width, height, f => {
+            onStage('Normalizing water...', f);
+            return yieldToPage();
+          });
+          normalized = plan.stats;
+        }
+      } catch (e) {
+        normalized = 'unavailable (' + e.message + ')';
+      }
+    }
     let bathymetry = null;
     if (submerge) {
       onStage('Fetching water depths...');
-      bathymetry = await applyBathymetry(heights, width, height, region, submerge, f => onStage('Fetching water depths...', f));
+      bathymetry = await applyBathymetry(heights, width, height, region, submerge, f => onStage('Fetching water depths...', f), lifted);
+      onStage('Laying water beds...', 0);
+      await yieldToPage();
+      const beds = await layBeds(heights, width, height, submerge, lifted, GAME_METERS_PER_PIXEL, scale, f => {
+        onStage('Laying water beds...', f);
+        return yieldToPage();
+      });
+      if (beds) bathymetry += ', beds estimated under ' + (beds * (groundWidth(region) / (width - 1)) ** 2 / 1e6).toFixed(1) + ' km2 of water without depth data';
     }
-    // limits sees the peak before smoothing, the same one the preview measures.
-    const peak = highest(heights);
     if (smoothing) {
       onStage('Smoothing terrain...', 0);
       await yieldToPage();
@@ -1105,7 +1408,6 @@ var heightmapExport = (function () {
       });
     }
 
-    const {floor, ceiling} = limits(peak);
     const {lo, hi, capped} = clampAndMeasure(heights, floor, ceiling);
     const levels = range(lo, hi);
     const black = levels.min, white = levels.max;
@@ -1125,6 +1427,7 @@ var heightmapExport = (function () {
       ceilingMeters: ceiling,
       cappedFraction: capped / heights.length,
       bathymetry: bathymetry,
+      waterNormalization: normalized,
       dataMinMeters: lo, dataMaxMeters: hi,
       sourceZoom: zoom,
       upsampled: (region.x1 - region.x0) * TILE_SIZE * 2 ** zoom < width - 1
@@ -1150,6 +1453,9 @@ var heightmapExport = (function () {
     render: render,
     renderBiomes: renderBiomes,
     terrainPatch: terrainPatch,
+    planWater: function (bounds, width, height, scale, level, onStage, rivers) {
+      return planWaterFor(boundsToRegion(bounds), width, height, null, scale, level, onStage, rivers);
+    },
     zip: makeZip,
     yieldToPage: yieldToPage
   };

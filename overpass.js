@@ -31,10 +31,19 @@ var overpass = (function () {
   }
 
   // The nodes inside bounds matching an Overpass tag filter such as ["natural"="volcano"].
-  // A down or overloaded instance shouldn't stall the export, so the next one starts after a short wait or a failure.
   function nodes(bounds, filter) {
-    const parts = bboxes(bounds).map(b => `node${filter}(${b.join(',')});`).join('');
-    const body = new URLSearchParams({data: `[out:json][timeout:90];(${parts});out qt;`});
+    return query(bounds, 'node' + filter, 'out qt;');
+  }
+
+  // The ways inside bounds matching a tag filter, each with its points as geometry: [{lat, lon}, ...].
+  function ways(bounds, filter) {
+    return query(bounds, 'way' + filter, 'out geom qt;');
+  }
+
+  // A down or overloaded instance shouldn't stall the export, so the next one starts after a short wait or a failure.
+  function query(bounds, selector, output) {
+    const parts = bboxes(bounds).map(b => `${selector}(${b.join(',')});`).join('');
+    const body = new URLSearchParams({data: `[out:json][timeout:90];(${parts});${output}`});
     const done = new AbortController();
     const errors = [];
     let next = 0, running = 0;
@@ -68,5 +77,5 @@ var overpass = (function () {
     });
   }
 
-  return {nodes: nodes};
+  return {nodes: nodes, ways: ways};
 }());
