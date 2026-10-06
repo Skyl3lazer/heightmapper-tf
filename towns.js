@@ -10,8 +10,12 @@ var townExport = (function () {
   const SIZE_RANGE = [0.55, 2.6];
   const DEFAULT_POPULATION = {city: 50000, town: 10000, village: 1000};
   // Largest place types first. Overpass can't rank by population, so smaller types are fetched only while the larger ones leave the map short of towns.
-  // The last value is the most real km2 a type is looked up over, past which its lookup runs into Overpass's time limit.
+  // The last value is the most real km2 one lookup of a type covers, past which it runs into Overpass's time limit.
   const PLACE_TIERS = [['city', 'cities', Infinity], ['town', 'towns', 1e6], ['village', 'villages', 2.5e5]];
+  // Spots per side of a tile tested for room left for another town.
+  const TOWN_TILE_SAMPLES = 8;
+  // Most tiles one type is looked up in, which keeps a world map's lookup to minutes.
+  const MAX_TOWN_TILES = 24;
   const COMMERCIAL_NEEDS = ['vegetables', 'fish', 'meat'];
   const INDUSTRIAL_NEEDS = ['bricks', 'planks', 'fuel'];
   // The game starts every town with one straight street centered on its position. A town whose street can't be built never grows.
@@ -218,35 +222,69 @@ var townExport = (function () {
     }
 
     const centerLng = (bounds.west + bounds.east) / 2;
-    const candidates = [];
-    const areaKm2 = heightmapExport.groundWidth(bounds) * heightmapExport.groundHeight(bounds) / 1e6;
-    let towns = [], skipped = [], nudgesDone = 0, nudgesDue = 0, note = null;
-    for (const [tag, plural, maxKm2] of includeVillages ? PLACE_TIERS : PLACE_TIERS.slice(0, 2)) {
-      if (areaKm2 > maxKm2) {
-        note = plural + ' not looked up, the map covers too much ground';
-        break;
+    // Game position of a point, east and north of the map center before a landscape export turns it, or null within EDGE_MARGIN of the edge.
+    function position(lat, lon) {
+      const p = heightmapExport.project(lat, lon);
+      const x = snap(((p.x - nw.x) / (se.x - nw.x) - 0.5) * 2 * halfX);
+      const y = snap((0.5 - (p.y - nw.y) / (se.y - nw.y)) * 2 * halfY);
+      return Math.abs(x) > halfX - EDGE_MARGIN || Math.abs(y) > halfY - EDGE_MARGIN ? null : {x: x, y: y};
+    }
+    // Places of one type, looked up in tiles of at most maxKm2 so no lookup runs into Overpass's time limit.
+    // Tiles with no room left for another town are left out. report(fraction): called as tiles finish.
+    async function lookUp(tag, maxKm2, report) {
+      const areaKm2 = heightmapExport.groundWidth(bounds) * heightmapExport.groundHeight(bounds) / 1e6;
+      const count = Math.max(1, Math.ceil(areaKm2 / maxKm2)), aspect = heightmapExport.groundWidth(bounds) / heightmapExport.groundHeight(bounds);
+      const cols = Math.max(1, Math.round(Math.sqrt(count * aspect))), rows = Math.ceil(count / cols);
+      const tiles = [];
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const tile = {
+            north: bounds.north + (bounds.south - bounds.north) * r / rows, south: bounds.north + (bounds.south - bounds.north) * (r + 1) / rows,
+            west: bounds.west + (bounds.east - bounds.west) * c / cols, east: bounds.west + (bounds.east - bounds.west) * (c + 1) / cols, room: 0
+          };
+          for (let j = 0; j <= TOWN_TILE_SAMPLES; j++) {
+            for (let i = 0; i <= TOWN_TILE_SAMPLES; i++) {
+              const at = position(tile.north + (tile.south - tile.north) * j / TOWN_TILE_SAMPLES, tile.west + (tile.east - tile.west) * i / TOWN_TILE_SAMPLES);
+              const turned = at && (northLeft ? {x: -at.y, y: at.x} : at);
+              if (turned && towns.every(t => Math.hypot(t.x - turned.x, t.y - turned.y) >= minSpacing)) tile.room++;
+            }
+          }
+          if (tile.room) tiles.push(tile);
+        }
       }
+      tiles.sort((a, b) => b.room - a.room);
+      const chosen = tiles.slice(0, MAX_TOWN_TILES), places = new Map();
+      for (const [n, tile] of chosen.entries()) {
+        if (chosen.length > 1) report(n / chosen.length);
+        for (const place of await overpass.nodes(rows * cols > 1 ? tile : bounds, `["place"="${tag}"]`)) places.set(place.id, place);
+      }
+      return {places: [...places.values()], left: tiles.length - chosen.length};
+    }
+
+    const candidates = [];
+    let towns = [], skipped = [], nudgesDone = 0, nudgesDue = 0;
+    const notes = [];
+    for (const [tag, plural, maxKm2] of includeVillages ? PLACE_TIERS : PLACE_TIERS.slice(0, 2)) {
       onStage('Looking up ' + plural + '...');
-      let places;
+      let found;
       try {
-        places = await overpass.nodes(bounds, `["place"="${tag}"]`);
+        found = await lookUp(tag, maxKm2, f => onStage('Looking up ' + plural + '...', f));
       } catch (e) {
         // Smaller places only fill out a map, so the towns already placed are kept.
         if (!candidates.length) throw e;
-        note = plural + ' left out because ' + e.message;
+        notes.push(plural + ' left out because ' + e.message);
         break;
       }
-      for (const place of places) {
+      if (found.left) notes.push(plural + ' not looked up in ' + found.left + ' areas of the map with the least room left, which would take too many lookups');
+      for (const place of found.places) {
         const name = originalNames ? String(place.tags.name || '').trim() : latinName(place.tags);
         if (!name) continue;
         // OpenStreetMap longitudes stay within -180 to 180, so they move to the copy of the world the box is in.
         const lon = place.lon + 360 * Math.round((centerLng - place.lon) / 360);
-        const p = heightmapExport.project(place.lat, lon);
-        const x = snap(((p.x - nw.x) / (se.x - nw.x) - 0.5) * 2 * halfX);
-        const y = snap((0.5 - (p.y - nw.y) / (se.y - nw.y)) * 2 * halfY);
-        if (Math.abs(x) > halfX - EDGE_MARGIN || Math.abs(y) > halfY - EDGE_MARGIN) continue;
-        candidates.push({name: name, x: northLeft ? -y : x, y: northLeft ? x : y, lat: place.lat, lng: lon, population: population(place.tags),
-          px: Math.round(x / GAME_METERS_PER_PIXEL + (width - 1) / 2), py: Math.round((height - 1) / 2 - y / GAME_METERS_PER_PIXEL)});
+        const at = position(place.lat, lon);
+        if (!at) continue;
+        candidates.push({name: name, x: northLeft ? -at.y : at.x, y: northLeft ? at.x : at.y, lat: place.lat, lng: lon, population: population(place.tags),
+          px: Math.round(at.x / GAME_METERS_PER_PIXEL + (width - 1) / 2), py: Math.round((height - 1) / 2 - at.y / GAME_METERS_PER_PIXEL)});
       }
       candidates.sort((a, b) => b.population - a.population);
       // Nudges run in batches between passes so the progress bar knows how many are due.
@@ -294,7 +332,7 @@ var townExport = (function () {
       t.industrial = INDUSTRIAL_NEEDS[Math.floor(h / 3) % 3];
     });
 
-    return {lua: toLua(towns), towns: towns, candidates: candidates.length, skipped: skipped, note: note};
+    return {lua: toLua(towns), towns: towns, candidates: candidates.length, skipped: skipped, note: notes.join('; ') || null};
   }
 
   return {build: build};
