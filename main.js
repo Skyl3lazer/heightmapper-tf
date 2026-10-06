@@ -1336,7 +1336,7 @@ map = (function () {
   window.addEventListener('load', function () {
     // Scene initialized
     layer.on('init', function() {
-      gui = new dat.GUI({ autoPlace: true, hideable: true, width: 300 });
+      gui = new dat.GUI({ autoPlace: true, hideable: true, width: 320 });
       addGUI();
       // resetViewComplete();
       scene.subscribe({
