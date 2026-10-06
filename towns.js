@@ -10,7 +10,8 @@ var townExport = (function () {
   const SIZE_RANGE = [0.55, 2.6];
   const DEFAULT_POPULATION = {city: 50000, town: 10000, village: 1000};
   // Largest place types first. Overpass can't rank by population, so smaller types are fetched only while the larger ones leave the map short of towns.
-  const PLACE_TIERS = [['city', 'cities'], ['town', 'towns'], ['village', 'villages']];
+  // The last value is the most real km2 a type is looked up over, past which its lookup runs into Overpass's time limit.
+  const PLACE_TIERS = [['city', 'cities', Infinity], ['town', 'towns', 1e6], ['village', 'villages', 2.5e5]];
   const COMMERCIAL_NEEDS = ['vegetables', 'fish', 'meat'];
   const INDUSTRIAL_NEEDS = ['bricks', 'planks', 'fuel'];
   // The game starts every town with one straight street centered on its position. A town whose street can't be built never grows.
@@ -218,10 +219,24 @@ var townExport = (function () {
 
     const centerLng = (bounds.west + bounds.east) / 2;
     const candidates = [];
-    let towns = [], skipped = [], nudgesDone = 0, nudgesDue = 0;
-    for (const [tag, plural] of includeVillages ? PLACE_TIERS : PLACE_TIERS.slice(0, 2)) {
+    const areaKm2 = heightmapExport.groundWidth(bounds) ** 2 * (height - 1) / (width - 1) / 1e6;
+    let towns = [], skipped = [], nudgesDone = 0, nudgesDue = 0, note = null;
+    for (const [tag, plural, maxKm2] of includeVillages ? PLACE_TIERS : PLACE_TIERS.slice(0, 2)) {
+      if (areaKm2 > maxKm2) {
+        note = plural + ' not looked up, the map covers too much ground';
+        break;
+      }
       onStage('Looking up ' + plural + '...');
-      for (const place of await overpass.nodes(bounds, `["place"="${tag}"]`)) {
+      let places;
+      try {
+        places = await overpass.nodes(bounds, `["place"="${tag}"]`);
+      } catch (e) {
+        // Smaller places only fill out a map, so the towns already placed are kept.
+        if (!candidates.length) throw e;
+        note = plural + ' left out because ' + e.message;
+        break;
+      }
+      for (const place of places) {
         const name = originalNames ? String(place.tags.name || '').trim() : latinName(place.tags);
         if (!name) continue;
         // OpenStreetMap longitudes stay within -180 to 180, so they move to the copy of the world the box is in.
@@ -279,7 +294,7 @@ var townExport = (function () {
       t.industrial = INDUSTRIAL_NEEDS[Math.floor(h / 3) % 3];
     });
 
-    return {lua: toLua(towns), towns: towns, candidates: candidates.length, skipped: skipped};
+    return {lua: toLua(towns), towns: towns, candidates: candidates.length, skipped: skipped, note: note};
   }
 
   return {build: build};

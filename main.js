@@ -1233,6 +1233,7 @@ map = (function () {
       lines.push((nudging ? 'skipped, no working spot within ' + TOWN_NUDGE_REACH + ' m: ' : 'skipped, first street fails: ') + list(result.skipped, withProblems));
     }
     if (risky.length) lines.push('may never grow, first street fails: ' + list(risky, withProblems));
+    if (result.note) lines.push(result.note);
     return lines;
   }
 
