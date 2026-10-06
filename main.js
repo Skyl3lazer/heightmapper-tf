@@ -41,7 +41,7 @@ map = (function () {
   const SETTINGS_KEY = 'heightmapper-settings', CONSENT_KEY = 'heightmapper-remember';
   // Climate, the heights and the view are left out because they follow the place on the map.
   const SAVED_SETTINGS = ['include_oceans', 'reference_map', 'mapSize', 'ratio', 'orientation', 'scaleMode', 'smoothing', 'oceanFloor', 'bitDepth',
-    'waterNormalization', 'maxTowns', 'townSpacing', 'includeVillages', 'townNames', 'townSafety', 'fileName'];
+    'waterNormalization', 'normalizationLift', 'maxTowns', 'townSpacing', 'includeVillages', 'townNames', 'townSafety', 'fileName'];
   // The game has one water level. A lake's level drowns all lower land. Auto mode skips levels drowning more than this share of the map.
   const MAX_FLOOD_SHARE = 0.15;
   // Auto mode also skips levels drowning more than this many times the water body's own area, like a tiny flat patch at the bottom of a dry valley.
@@ -182,6 +182,7 @@ map = (function () {
     gui.smoothing = 0;
     gui.oceanFloor = String(GAME_MIN_HEIGHT);
     gui.waterNormalization = false;
+    gui.normalizationLift = 100;
     gui.bitDepth = 16;
     exportFolder.add(gui, 'mapSize', Object.keys(MAP_SIZES)).name('map size').onChange(updateExportBox);
     exportFolder.add(gui, 'ratio', RATIOS).name('ratio').onChange(regionChanged);
@@ -201,7 +202,10 @@ map = (function () {
     smoothingRow.__precision = 2;
     smoothingRow.updateDisplay();
     onEdit(exportFolder.add(gui, 'oceanFloor').name('ocean floor (m)'), runAnalysis);
-    var normalizationRow = exportFolder.add(gui, 'waterNormalization').name('water normalization').onChange(runAnalysis);
+    var normalizationRow = exportFolder.add(gui, 'waterNormalization').name('water normalization').onChange(function() {
+      showLiftRow();
+      runAnalysis();
+    });
     normalizationRow.__li.title = [
       'The game has one water level, so rivers and lakes above it come out dry.',
       'This lowers them onto the water level, with the land around them, so they fill along their whole length.',
@@ -209,6 +213,13 @@ map = (function () {
     ].join('\n');
     showSign(addSign(normalizationRow, 'experimental'), 'Experimental: Water normalization that keeps rivers and other bodies of water at a singular water level, ' +
       'blending surrounding terrain, to maintain waterways across real world elevation changes.');
+    exportFolder.add(gui, 'normalizationLift', 0, 200).step(1).name('max water displacement (m)').onFinishChange(runAnalysis);
+    // step() rebuilds a slider row and hands back the old one.
+    var liftRow = controller('normalizationLift');
+    liftRow.__li.title = 'The most in-game meters water normalization lowers a river or lake. Water higher above the water level stays dry.';
+    function showLiftRow() {
+      liftRow.__li.style.display = gui.waterNormalization ? '' : 'none';
+    }
     bitDepthHint = addSign(exportFolder.add(gui, 'bitDepth', [16, 8]).name('bit depth').onChange(updateHints), 'info');
     // dat.gui only recognizes plain functions as buttons, not async ones.
     gui.exportHeightmap = function () { exportRegion(); };
@@ -258,6 +269,7 @@ map = (function () {
     }
     gui.add(gui, 'help');
     restoreSettings();
+    showLiftRow();
     updateEditable();
     
   }
@@ -723,6 +735,7 @@ map = (function () {
         },
         submerge: previewSubmerge,
         normalizeWater: gui.waterNormalization ? previewWaterSurface : null,
+        normalizeLift: gui.normalizationLift,
         smoothing: gui.smoothing / GAME_METERS_PER_PIXEL,
         outputWidth: out.width
       });
@@ -1006,7 +1019,7 @@ map = (function () {
       bounds: exportBounds(), out: out, northLeft: northLeft(), image: imageSize(), mpp: metersPerPixel(),
       name: exportName(), mapName: mapName(), climate: gui.climate, bitDepth: Number(gui.bitDepth), smoothing: gui.smoothing,
       auto: gui.autoexpose, oceans: gui.include_oceans, oceanFloor: needsHeights ? oceanFloor() : 0, waterNormalization: gui.waterNormalization,
-      request: needsHeights ? scaleRequest() : null, heights: needsHeights ? readHeights() : null, analysis: analysis,
+      normalizationLift: gui.normalizationLift, request: needsHeights ? scaleRequest() : null, heights: needsHeights ? readHeights() : null, analysis: analysis,
       towns: {maxTowns: Math.round(gui.maxTowns), minSpacing: Number(gui.townSpacing), includeVillages: gui.includeVillages, originalNames: gui.townNames == 'original', safety: gui.townSafety},
       view: viewKey()
     };
@@ -1014,7 +1027,7 @@ map = (function () {
 
   // Changes whenever the live fields would stop describing an export queued now.
   function viewKey() {
-    return JSON.stringify([exportBounds(), outputSize(), gui.scaleMode, requestedText, gui.autoexpose, gui.include_oceans, gui.oceanFloor, gui.smoothing, gui.waterNormalization]);
+    return JSON.stringify([exportBounds(), outputSize(), gui.scaleMode, requestedText, gui.autoexpose, gui.include_oceans, gui.oceanFloor, gui.smoothing, gui.waterNormalization, gui.normalizationLift]);
   }
 
   function exportName() {
@@ -1067,6 +1080,7 @@ map = (function () {
       waterLevel: dry ? -Infinity : h.waterline,
       waterFromRiver: h.river,
       normalizeWater: job.waterNormalization,
+      normalizeLift: job.normalizationLift,
       rivers: rivers.lines,
       riverSlack: rivers.slack,
       northLeft: job.northLeft,
@@ -1090,10 +1104,10 @@ map = (function () {
     return {blob: result.blob, meta: result.meta, heights: h, terrain: result.terrain, rivers: rivers.note};
   }
 
-  function normalizationNote(n, rivers) {
+  function normalizationNote(n, rivers, maxLift) {
     if (!n) return '';
     if (typeof n == 'string') return ', water normalization ' + n;
-    return ', ' + n.lowered + ' water bodies lowered up to ' + Math.round(n.deepest) + ' in-game m' + (n.dryKm2 >= 0.05 ? ', ' + n.dryKm2.toFixed(1) + ' km2 left dry over 100 m up' : '') +
+    return ', ' + n.lowered + ' water bodies lowered up to ' + Math.round(n.deepest) + ' in-game m' + (n.dryKm2 >= 0.05 ? ', ' + n.dryKm2.toFixed(1) + ' km2 left dry over ' + maxLift + ' m up' : '') +
       (rivers ? ', ' + rivers : '');
   }
 
@@ -1157,7 +1171,7 @@ map = (function () {
       'water depth: ' + (m.bathymetry || (job.oceans ? 'no water on the map' : 'ocean data off, below sea level clamped to 0 m')) +
         (typeof m.polders == 'number' && m.polders >= 0.05 ? ', ' + m.polders.toFixed(1) + ' km2 of dry land below the water level raised above it' : '') +
         (typeof m.polders == 'string' ? ', polders ' + m.polders : '') +
-        (job.smoothing ? ', land smoothed over ' + job.smoothing + ' in-game m' : '') + normalizationNote(m.waterNormalization, r.rivers),
+        (job.smoothing ? ', land smoothed over ' + job.smoothing + ' in-game m' : '') + normalizationNote(m.waterNormalization, r.rivers, job.normalizationLift),
       m.cappedFraction > 0 ? (m.cappedFraction * 100).toFixed(2) + '% of the map was above the game\'s ' + GAME_MAX_HEIGHT + ' m limit and was flattened. Lower the height scale to keep those peaks.' : null,
       'real ' + realSize(job.bounds) + ' at ' + m.metersPerPixel.toFixed(3) + ' m/px',
       'center ' + m.centerLat.toFixed(6) + ', ' + m.centerLng.toFixed(6),
@@ -1223,7 +1237,7 @@ map = (function () {
     var polders = !terrain && isFinite(levels.waterline) ? await heightmapExport.polders(job.bounds, job.out.width, job.out.height, levels.waterline, levels.k, report, levels.river).catch(function() { return null; }) : null;
     if (job.waterNormalization && !terrain && isFinite(levels.waterline)) {
       var rivers = await riverLines(job, report);
-      plan = await heightmapExport.planWater(job.bounds, job.out.width, job.out.height, levels.k, levels.waterline - SHORE_TOLERANCE, report, rivers.lines, rivers.slack);
+      plan = await heightmapExport.planWater(job.bounds, job.out.width, job.out.height, levels.k, levels.waterline - SHORE_TOLERANCE, report, rivers.lines, rivers.slack, job.normalizationLift);
     }
     var safety = job.towns.safety;
     var reach = safety == 'nudge' || safety == 'force' ? TOWN_NUDGE_REACH : 0;

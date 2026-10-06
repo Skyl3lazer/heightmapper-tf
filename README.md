@@ -33,6 +33,7 @@ You now have a fully playable map!
 - smoothing (in-game m): blurs the land over roughly this distance in the game's own meters, to calm bumpy real-world data. 0 turns it off. Water and the shoreline are left as they are.
 - include ocean data / ocean floor (m): Water below the water level takes its depth from NOAA's DEM Global Mosaic, which has real depths where the elevation tiles store water as a flat surface, and the ocean floor sets the lowest in-game height allowed. With it off, everything below sea level is clamped to 0 m. The game's lowest minimum height is -100. This option also controls riverbed generation where NOAA data doesn't exist for large rivers inland.
 - water normalization: TF doesn't model water flow and only has one water level. This option takes major water sources and attempts to bring them to the set water level to ensure that rivers/lakes/etc at different elevations can fill. They embed by gently sloping back to normal terrain height, up to ~10m difference in height.
+- max water displacement (m): shown while water normalization is on. The most in-game meters a river or lake is lowered to reach the water level. Water sitting higher stays dry. 100 by default. Raise it for high lakes at the cost of a deeper bowl around them.
 - bit depth: 16-bit grayscale PNG with no alpha channel by default. 8-bit is also available but its height steps are coarse.
 - town names: take latin-character only names or the original accented/character names.
 - generation safety: 

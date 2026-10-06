@@ -29,8 +29,6 @@ var heightmapExport = (function () {
   const LC_NO_DATA = 0, LC_WATER = 1, LC_TREES = 2, LC_FLOODED = 4, LC_BARE = 8, LC_SNOW = 9, LC_CLOUDS = 10;
   // Water normalization. Smaller water bodies would pin the land around them to the water level.
   const NORMALIZE_MIN_KM2 = 0.5;
-  // In-game meters. Higher water bodies would need a crater around them. They stay dry.
-  const NORMALIZE_MAX_LIFT = 100;
   // The steepest slope normalization adds to land in game, and the slope of the beds it lays below the shore.
   const NORMALIZE_GRADE = 0.1;
   // In-game meters. Rivers lowered by different amounts meet in a seam, which a blur this wide turns into a slope.
@@ -854,7 +852,7 @@ var heightmapExport = (function () {
     const biome = new Uint8Array(gw * gh), mountains = new Uint8Array(gw * gh), water = new Uint8Array(gw * gh);
     const slope = new Float32Array(gw * gh);
     // The heightmap raises polder land. It stays land here too.
-    const dryness = signedDistance(cover.map(lc => dryLand(lc) ? 1 : 0), gw, gh);
+    const dryness = polderEdge(cover.map(lc => dryLand(lc) ? 1 : 0), gw, gh);
     const polders = polderLand(heights, gw, gh, waterLevel, i => dryness[i], POLDER_MIN_KM2 * 1e6 / realSpacing ** 2, waterFromRiver ? 0 : Math.max(1, POLDER_INLAND / realSpacing));
     for (let y = 0; y < gh; y++) {
       for (let x = 0; x < gw; x++) {
@@ -1135,7 +1133,8 @@ var heightmapExport = (function () {
   // heights and cover: real meters and land cover classes on the grid. areas: as rowAreas gives. gameCell: in-game meters per cell.
   // level: real meters the water should end at. Returns null when there is no water to work from.
   // rivers: optional, river courses on the grid. Land cover misses rivers narrower than its 10 m cells can see.
-  async function planWater(heights, cover, gw, gh, areas, gameCell, scale, level, rivers) {
+  // maxLift: in-game meters. Higher water would need a crater around it. It stays dry.
+  async function planWater(heights, cover, gw, gh, areas, gameCell, scale, level, rivers, maxLift) {
     const n = gw * gh;
     const water = new Uint8Array(n);
     for (let i = 0; i < n; i++) if (cover[i] === LC_WATER || (rivers && rivers[i])) water[i] = 1;
@@ -1175,7 +1174,8 @@ var heightmapExport = (function () {
     }
     if (!any) return null;
 
-    const guard = 1 / scale, maxLift = NORMALIZE_MAX_LIFT / scale;
+    const guard = 1 / scale;
+    maxLift /= scale;
     const lift = new Float32Array(n), lowered = new Uint8Array(n), atLevel = new Uint8Array(n);
     // The limit goes cell by cell. A river climbing into hills still fills its lower reaches. A lake, being flat, fills or stays dry whole.
     const bodies = new Uint8Array(count + 1);
@@ -1253,7 +1253,8 @@ var heightmapExport = (function () {
 
   // heights: real meters for the whole output, or null to fetch coarser ones. cover: optional, land cover as landCoverFor gives it.
   // rivers: optional, river courses as [[lat, lon], ...] lines. riverSlack: optional, real meters they may stray from their river.
-  async function planWaterFor(region, width, height, heights, scale, level, onStage, rivers, riverSlack, cover) {
+  // maxLift: as for planWater.
+  async function planWaterFor(region, width, height, heights, scale, level, onStage, rivers, riverSlack, cover, maxLift) {
     const {width: gw, height: gh} = rasterSize(width, height);
     let coarse;
     if (heights) {
@@ -1271,7 +1272,7 @@ var heightmapExport = (function () {
     let lines = rivers ? riverPixels(rivers, region, width, height) : null;
     if (lines && reach >= 1) lines = snapLines(lines, cover, gw, gh, sx, sy, reach);
     const plan = await planWater(coarse, cover, gw, gh, rowAreas(region, gw, gh), GAME_METERS_PER_PIXEL * (width - 1) / (gw - 1), scale, level,
-      lines ? drawLines(lines, sx, sy, 0, 0, gw, gh, 0) : null);
+      lines ? drawLines(lines, sx, sy, 0, 0, gw, gh, 0) : null, maxLift);
     if (plan) plan.lines = lines;
     return plan;
   }
@@ -1353,6 +1354,11 @@ var heightmapExport = (function () {
     return state;
   }
 
+  // Land cover's cells would draw a raised shore as a staircase. A light blur straightens it, at the cost of water one cell wide.
+  function polderEdge(dry, gw, gh) {
+    return boxMean(signedDistance(dry, gw, gh), gw, gh, 1);
+  }
+
   // The game has one water level, which would drown dry land enclosed below it, like polders. Such land goes one in-game meter above the water instead.
   // cover: as landCoverFor gives it. waterline: real meters at or below which the map is water.
   // pixelMeters, cellMeters: real meters per output pixel and per land cover cell.
@@ -1360,7 +1366,7 @@ var heightmapExport = (function () {
   function polderPlan(cover, gw, gh, waterline, scale, pixelMeters, cellMeters, everywhere) {
     const dry = new Uint8Array(gw * gh);
     for (let i = 0; i < dry.length; i++) dry[i] = dryLand(cover[i]) ? 1 : 0;
-    return {edge: signedDistance(dry, gw, gh), gw: gw, gh: gh, waterline: waterline, top: waterline + 1 / scale,
+    return {edge: polderEdge(dry, gw, gh), gw: gw, gh: gh, waterline: waterline, top: waterline + 1 / scale,
       minPixels: POLDER_MIN_KM2 * 1e6 / pixelMeters ** 2, inland: everywhere ? 0 : Math.max(1, POLDER_INLAND / cellMeters)};
   }
 
@@ -1458,7 +1464,9 @@ var heightmapExport = (function () {
           heights[k] = before;
         }
         if (line && heights[k] > level) {
-          heights[k] = Math.min(heights[k], level + guard + (lineDistance - halfWidth) * GAME_METERS_PER_PIXEL * RIVER_BANK_GRADE / scale);
+          // A bank takes away no more than the channel cut, which keeps valley walls whole.
+          const rise = (lineDistance - halfWidth) * GAME_METERS_PER_PIXEL * RIVER_BANK_GRADE / scale;
+          if (rise < RIVER_LINE_TOLERANCE) heights[k] = Math.max(Math.min(heights[k], level + guard + rise), heights[k] - (RIVER_LINE_TOLERANCE - rise));
         }
       }
       if (onProgress && j % ROW_BATCH === ROW_BATCH - 1) await onProgress((j + 1) / height);
@@ -1572,8 +1580,9 @@ var heightmapExport = (function () {
   // submerge(water, floodShare, areaKm2): given the water surfaces found, the {level, top} in meters for applyBathymetry, or null.
   // smoothing: as for render, in pixels of an image outputWidth wide.
   // normalizeWater(water, floodShare, areaKm2): given the water surfaces found, the real height rivers and lakes above it are lowered to, or null.
+  // normalizeLift: as planWater's maxLift.
   async function analyze(options) {
-    const {bounds, aspect, limits, submerge, smoothing, outputWidth, normalizeWater} = options;
+    const {bounds, aspect, limits, submerge, smoothing, outputWidth, normalizeWater, normalizeLift} = options;
     const region = boundsToRegion(bounds);
     const width = Math.max(2, Math.round(PREVIEW_SIZE * Math.min(1, aspect)));
     const height = Math.max(2, Math.round(PREVIEW_SIZE * Math.min(1, 1 / aspect)));
@@ -1598,7 +1607,7 @@ var heightmapExport = (function () {
     const surface = normalizeWater && cover ? normalizeWater(water, floodShare, areaKm2) : null;
     let plan = null, lifted = null;
     if (surface !== null && isFinite(surface)) {
-      plan = await planWater(heights, cover, width, height, areas, gameCell, scale, surface);
+      plan = await planWater(heights, cover, width, height, areas, gameCell, scale, surface, null, normalizeLift);
       if (plan) lifted = await applyWaterPlan(plan, heights, width, height, 0, 0, width, height);
     }
     let bathymetry = null;
@@ -1620,11 +1629,11 @@ var heightmapExport = (function () {
   // submerge: the {level, top} in meters for applyBathymetry, or null. smoothing: the blur's sigma in pixels, or 0.
   // waterLevel: real meters at or below which the map is water. That water stays out of the smoothing. Dry land below the level is raised above it.
   // waterFromRiver: the level is a river's lowest point. All dry land below it is raised.
-  // normalizeWater: lower rivers and lakes onto the water surface limits gives, in real meters as waterSurface.
+  // normalizeWater: lower rivers and lakes onto the water surface limits gives, in real meters as waterSurface. normalizeLift: as planWater's maxLift.
   // rivers: optional, river courses as [[lat, lon], ...] lines for normalization. riverSlack: optional, real meters they may stray from their river.
   // width and height are the region's, north up. northLeft turns the image a quarter left.
   async function render(options) {
-    const {bounds, width, height, bitDepth, range, limits, submerge, smoothing, waterLevel, waterFromRiver, northLeft, normalizeWater, rivers, riverSlack} = options;
+    const {bounds, width, height, bitDepth, range, limits, submerge, smoothing, waterLevel, waterFromRiver, northLeft, normalizeWater, normalizeLift, rivers, riverSlack} = options;
     const onProgress = options.onProgress || function () {};
     const onStage = options.onStage || function () {};
     const region = boundsToRegion(bounds);
@@ -1646,7 +1655,7 @@ var heightmapExport = (function () {
     }
     if (normalizeWater && isFinite(waterSurface)) {
       try {
-        const plan = await planWaterFor(region, width, height, heights, scale, waterSurface, onStage, rivers, riverSlack, cover);
+        const plan = await planWaterFor(region, width, height, heights, scale, waterSurface, onStage, rivers, riverSlack, cover, normalizeLift);
         if (plan) {
           onStage('Normalizing water...', 0);
           await yieldToPage();
@@ -1738,8 +1747,8 @@ var heightmapExport = (function () {
       const region = boundsToRegion(bounds);
       return polderPlan(await landCoverFor(region, width, height, onStage), gw, gh, waterline, scale, groundWidth(region) / (width - 1), groundWidth(region) / (gw - 1), everywhere);
     },
-    planWater: function (bounds, width, height, scale, level, onStage, rivers, riverSlack) {
-      return planWaterFor(boundsToRegion(bounds), width, height, null, scale, level, onStage, rivers, riverSlack);
+    planWater: function (bounds, width, height, scale, level, onStage, rivers, riverSlack, maxLift) {
+      return planWaterFor(boundsToRegion(bounds), width, height, null, scale, level, onStage, rivers, riverSlack, null, maxLift);
     },
     zip: makeZip,
     yieldToPage: yieldToPage
