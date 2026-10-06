@@ -167,14 +167,6 @@ map = (function () {
     gui.include_oceans = true;
     gui.add(gui, 'include_oceans').name("include ocean data").onChange(runAnalysis);
 
-    gui.export = function () {
-      return scene.screenshot().then(function(screenshot) {
-        // uses FileSaver.js: https://github.com/eligrey/FileSaver.js/
-        saveAs(screenshot.blob, 'heightmapper-' + (+new Date()) + '.png');
-      });
-    }
-    gui.add(gui, 'export').name("screenshot (8-bit view)");
-
     gui.reference_map = false;
     gui.add(gui, 'reference_map').name("reference map").onChange(function(value) {
       if (value) referenceLayer.addTo(map);

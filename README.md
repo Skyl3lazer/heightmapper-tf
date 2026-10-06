@@ -43,7 +43,6 @@ You now have a fully playable map!
     - 'nudge-force': takes the nearest safe pixel within 200 m in a straight line, even across water. If there's none, the town is skipped. Nudged towns shown in blue.
 - export all: runs the heightmap, biome and town exports and saves them together as `<file name>.zip`.
 - reference map: overlays OpenStreetMap for finding places.
-- screenshot: saves the current view as an 8-bit image for testing.
 - Press the "h" key to toggle UI visibility.
 
 #### Export Info
