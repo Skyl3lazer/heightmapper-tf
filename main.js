@@ -46,6 +46,8 @@ map = (function () {
   const MAX_FLOOD_SHARE = 0.15;
   // ...and levels drowning more than this many times the water body's own area, like a tiny flat patch at the bottom of a dry valley.
   const MAX_FLOOD_RATIO = 4;
+  // A level from a river's lowest point raises all dry land below it, so more than this share of the map there means the river reading is off.
+  const RIVER_FLOOD_SHARE = 0.02;
   // Official in-game size in km, [short side, long side], for each ratio 1:1 to 1:5.
   const MAP_SIZES = {
     'Tiny': [[4, 4], [2.5, 5], [2, 6], [2, 8], [1.5, 7.5]],
@@ -642,7 +644,7 @@ map = (function () {
   function suggestedWaterLevel() {
     var k = Number(gui.heightScale);
     if (!analysis || !(k > 0)) return null;
-    var choice = autoWaterChoice(waterChoices(analysis.water, k, analysis.floodShare, gui.include_oceans), analysis.areaKm2);
+    var choice = autoWaterChoice(waterChoices(analysis.water, k, analysis.floodShare, gui.include_oceans), analysis.areaKm2, gui.waterNormalization);
     return choice ? choice.level : null;
   }
 
@@ -765,7 +767,7 @@ map = (function () {
     if (!gui.include_oceans) return null;
     var k = heightScale();
     if (!gui.autoexpose) return submergeFor(Number(gui.waterLevel), Number(gui.waterLevel) / k, k);
-    var choice = autoWaterChoice(waterChoices(water, k, floodShare, true), areaKm2);
+    var choice = autoWaterChoice(waterChoices(water, k, floodShare, true), areaKm2, gui.waterNormalization);
     return choice ? submergeFor(choice.level, choice.waterline, k) : null;
   }
 
@@ -773,14 +775,15 @@ map = (function () {
   function previewWaterSurface(water, floodShare, areaKm2) {
     var k = heightScale();
     if (!gui.autoexpose) return Number(gui.waterLevel) / k - SHORE_TOLERANCE;
-    var choice = autoWaterChoice(waterChoices(water, k, floodShare, gui.include_oceans), areaKm2);
+    var choice = autoWaterChoice(waterChoices(water, k, floodShare, gui.include_oceans), areaKm2, true);
     return choice ? choice.waterline - SHORE_TOLERANCE : null;
   }
 
   // Dry land enclosed below sea level is raised above it instead of drowning, so the sea needs no flood limit. Raising land to a lake's level would flatten whole valleys.
-  function autoWaterChoice(choices, areaKm2) {
+  // normalizing: water normalization is on, which can lower a river onto its lowest point, so that point can serve as the level.
+  function autoWaterChoice(choices, areaKm2, normalizing) {
     return choices.filter(function(c) {
-      return c.sea || (c.flood <= MAX_FLOOD_SHARE && c.flood * areaKm2 <= MAX_FLOOD_RATIO * c.areaKm2);
+      return c.river ? normalizing && c.flood <= RIVER_FLOOD_SHARE : c.sea || (c.flood <= MAX_FLOOD_SHARE && c.flood * areaKm2 <= MAX_FLOOD_RATIO * c.areaKm2);
     })[0] || null;
   }
 
@@ -793,10 +796,11 @@ map = (function () {
       if (same) {
         same.areaKm2 += w.areaKm2;
         same.sea = same.sea || w.sea;
+        same.river = same.river && w.river;
         same.waterline = Math.max(same.waterline, line.waterline);
         same.flood = floodShare(same.waterline);
       } else {
-        choices.push({level: line.level, waterline: line.waterline, areaKm2: w.areaKm2, flood: floodShare(line.waterline), sea: w.sea});
+        choices.push({level: line.level, waterline: line.waterline, areaKm2: w.areaKm2, flood: floodShare(line.waterline), sea: w.sea, river: w.river});
       }
     });
     return choices.sort(function(a, b) { return b.areaKm2 - a.areaKm2; });
@@ -810,7 +814,10 @@ map = (function () {
       setBoxWater(e.message);
       return;
     }
-    var shown = waterChoices(analysis.water, k, analysis.floodShare, gui.include_oceans).filter(function(c, i) { return i == 0 || c.areaKm2 >= 0.1; });
+    var choices = waterChoices(analysis.water, k, analysis.floodShare, gui.include_oceans);
+    // The lowest river water is only worth showing when no other level qualifies.
+    var levelled = autoWaterChoice(choices.filter(function(c) { return !c.river; }), analysis.areaKm2, false);
+    var shown = choices.filter(function(c) { return c.river ? !levelled : c === levelled || c === choices[0] || c.areaKm2 >= 0.1; });
     var depthNote = analysis.bathymetry && /unavailable/.test(analysis.bathymetry) ? ' (' + analysis.bathymetry + ')' : '';
     if (!shown.length) {
       setBoxWater('no flat water surfaces found' + depthNote);
@@ -819,6 +826,7 @@ map = (function () {
     setBoxWater('water levels: ' + shown.slice(0, 4).map(function(c) {
       var flood = c.sea ? (c.flood >= 0.005 ? ', raises ' + Math.round(c.flood * 100) + '% of the map above it' : '') :
         c.flood > MAX_FLOOD_SHARE ? ', floods ' + Math.round(c.flood * 100) + '% of the map' : '';
+      if (c.river) return c.level + ' (lowest river water' + (gui.waterNormalization ? '' : ', needs water normalization') + flood + ')';
       return c.level + ' (' + c.areaKm2.toFixed(1) + ' km2' + flood + ')';
     }).join(', ') + depthNote);
   }
@@ -845,7 +853,7 @@ map = (function () {
       showInputError(e.message);
       return;
     }
-    var h = heightsFor(analysis, k, gui.include_oceans, fixedMax(scaleRequest()));
+    var h = heightsFor(analysis, k, gui.include_oceans, fixedMax(scaleRequest()), gui.waterNormalization);
     gui.minHeight = String(h.min);
     gui.maxHeight = String(h.max);
     gui.waterLevel = String(h.water);
@@ -856,11 +864,13 @@ map = (function () {
 
   // In-game minimum, maximum and water level for an analysis at height scale k.
   // max: the in-game maximum to keep, or null to measure it.
-  function heightsFor(a, k, carved, max) {
+  // normalizing: as for autoWaterChoice.
+  function heightsFor(a, k, carved, max, normalizing) {
     var min = Math.max(GAME_MIN_HEIGHT, Math.floor(k * a.min));
     max = Math.min(GAME_MAX_HEIGHT, Math.max(min + 1, max || Math.ceil(k * a.max)));
-    var choice = autoWaterChoice(waterChoices(a.water, k, a.floodShare, carved), a.areaKm2);
-    return {k: k, min: min, max: max, water: choice ? choice.level : Math.max(GAME_MIN_HEIGHT, min - 1), waterline: choice ? choice.waterline : -Infinity};
+    var choice = autoWaterChoice(waterChoices(a.water, k, a.floodShare, carved), a.areaKm2, normalizing);
+    return {k: k, min: min, max: max, water: choice ? choice.level : Math.max(GAME_MIN_HEIGHT, min - 1), waterline: choice ? choice.waterline : -Infinity,
+      river: Boolean(choice && choice.river)};
   }
 
   function readHeights() {
@@ -1038,7 +1048,7 @@ map = (function () {
 
   async function buildHeightmap(job, report) {
     // The fields only hold the in-game water level, so auto mode takes the waterline from the analysis.
-    var h = job.auto && job.analysis ? heightsFor(job.analysis, job.heights.k, job.oceans, fixedMax(job.request)) :
+    var h = job.auto && job.analysis ? heightsFor(job.analysis, job.heights.k, job.oceans, fixedMax(job.request), job.waterNormalization) :
       Object.assign({waterline: job.heights.water / job.heights.k}, job.heights);
     var meta = {heightScale: h.k, waterLevel: h.water, smoothing: job.smoothing};
     var rivers = job.waterNormalization ? await riverLines(job, report) : {lines: null, note: null};
@@ -1057,7 +1067,7 @@ map = (function () {
         var k = job.auto ? fittedScale(requested, peak) : h.k;
         lowered = job.auto && k < scaleDigits(requested);
         if (k != h.k && job.analysis) {
-          h = heightsFor(job.analysis, k, job.oceans, fixedMax(job.request));
+          h = heightsFor(job.analysis, k, job.oceans, fixedMax(job.request), job.waterNormalization);
           Object.assign(meta, {heightScale: h.k, waterLevel: h.water});
         }
         // Normalized water ends just under the waterline, so the export takes it as water.
@@ -1076,6 +1086,7 @@ map = (function () {
       submerge: job.oceans && !dry ? submergeFor(h.water, h.waterline, h.k) : null,
       smoothing: job.smoothing / GAME_METERS_PER_PIXEL,
       waterLevel: dry ? -Infinity : h.waterline,
+      waterFromRiver: h.river,
       normalizeWater: job.waterNormalization,
       rivers: rivers.lines,
       riverSlack: rivers.slack,
@@ -1179,6 +1190,7 @@ map = (function () {
   // h: the in-game heights the water level comes from, when they differ from the job's.
   // lenient: an OpenStreetMap outage leaves the volcano mask empty instead of failing.
   async function buildBiomes(job, report, h, lenient) {
+    var waterFromRiver = townLevels(job, h).river;
     h = h || job.heights;
     var volcanoes = [], volcanoError = null;
     if (job.climate == 'Tropical') {
@@ -1196,6 +1208,7 @@ map = (function () {
       height: job.out.height,
       climate: job.climate,
       waterLevel: h.water / h.k,
+      waterFromRiver: waterFromRiver,
       volcanoes: volcanoes,
       northLeft: job.northLeft,
       onStage: report
@@ -1228,7 +1241,7 @@ map = (function () {
     var levels = townLevels(job, h);
     // Fetched town sites need the same raising of polders and lowering of water the heightmap gets, planned once for the whole map.
     var plan = null;
-    var polders = !terrain && isFinite(levels.waterline) ? await heightmapExport.polders(job.bounds, job.out.width, job.out.height, levels.waterline, levels.k, report).catch(function() { return null; }) : null;
+    var polders = !terrain && isFinite(levels.waterline) ? await heightmapExport.polders(job.bounds, job.out.width, job.out.height, levels.waterline, levels.k, report, levels.river).catch(function() { return null; }) : null;
     if (job.waterNormalization && !terrain && isFinite(levels.waterline)) {
       var rivers = await riverLines(job, report);
       plan = await heightmapExport.planWater(job.bounds, job.out.width, job.out.height, levels.k, levels.waterline - SHORE_TOLERANCE, report, rivers.lines, rivers.slack);
@@ -1297,8 +1310,8 @@ map = (function () {
 
   // The height scale, and the real meters at or below which the export makes water. Auto mode takes them from the analysis, since the fields only hold the in-game level.
   function townLevels(job, h) {
-    h = h || (job.auto && job.analysis ? heightsFor(job.analysis, job.heights.k, job.oceans, fixedMax(job.request)) : job.heights);
-    return {k: h.k, waterline: h.waterline !== undefined ? h.waterline : h.water / h.k};
+    h = h || (job.auto && job.analysis ? heightsFor(job.analysis, job.heights.k, job.oceans, fixedMax(job.request), job.waterNormalization) : job.heights);
+    return {k: h.k, waterline: h.waterline !== undefined ? h.waterline : h.water / h.k, river: Boolean(h.river)};
   }
 
   function exportRegion() {
