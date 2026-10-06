@@ -813,6 +813,13 @@ var heightmapExport = (function () {
     return d;
   }
 
+  // Signed distance in cells to the edge of the cells set in mask, positive inside. Interpolated at full resolution, its contour is a smooth outline.
+  function signedDistance(mask, width, height) {
+    const inside = distanceTo(mask.map(v => v ? 0 : 1), width, height), outside = distanceTo(mask, width, height), out = new Float32Array(mask.length);
+    for (let i = 0; i < mask.length; i++) out[i] = mask[i] ? Math.min(inside[i], width + height) - 0.5 : 0.5 - Math.min(outside[i], width + height);
+    return out;
+  }
+
   // Biome map plus the climate's layer masks for Transport Fever 3's biome import, from land cover and terrain steepness.
   // waterLevel: meters, anything at or below it is water. volcanoes: OpenStreetMap volcano nodes, {lat, lon}.
   // width and height are the region's, north up. northLeft turns every image a quarter left.
@@ -1180,9 +1187,7 @@ var heightmapExport = (function () {
         lowered[i] = atLevel[i] = 0;
       }
     }
-    // Signed distance in cells to the edge of the lowered water, positive inside. Interpolated at full resolution, its contour is a smooth outline.
-    const inside = distanceTo(lowered.map(v => 1 - v), gw, gh), outside = distanceTo(lowered, gw, gh), outline = new Float32Array(n);
-    for (let i = 0; i < n; i++) outline[i] = lowered[i] ? Math.min(inside[i], gw + gh) - 0.5 : 0.5 - Math.min(outside[i], gw + gh);
+    const outline = signedDistance(lowered, gw, gh), wet = signedDistance(kept, gw, gh);
     const stats = {lowered: bodies.filter(b => b & 2).length, dryKm2: dryArea / 1e6, deepest: deepest};
     // Water at the level that surveys a little above it, like a tidal channel, has its own flat surface, which draws its shoreline.
     // The middle of its neighbors skips bank samples. Water at or below the level stays out of it.
@@ -1228,7 +1233,7 @@ var heightmapExport = (function () {
       const w = Math.max(0, 1 - distance[i] * gameCell / (2 * NORMALIZE_SEAM));
       offset[i] = exact[i] * w + offset[i] * (1 - w);
     }
-    return {offset: offset, lift: lift, outline: outline, channel: channel, lineClass: lineClass, level: level, guard: guard, scale: scale, gw: gw, gh: gh, stats: stats};
+    return {offset: offset, lift: lift, outline: outline, wet: wet, channel: channel, lineClass: lineClass, level: level, guard: guard, scale: scale, gw: gw, gh: gh, stats: stats};
   }
 
   // Fetches land cover and plans water normalization for an output. heights: real meters for the whole output, or null to fetch coarser ones.
@@ -1326,7 +1331,7 @@ var heightmapExport = (function () {
   // The grid covers output pixels x0 to x0 + width - 1 and y0 to y0 + height - 1 of an output outputWidth x outputHeight.
   // onProgress(fraction): optional, called every ROW_BATCH rows, and awaited.
   async function applyWaterPlan(plan, heights, width, height, x0, y0, outputWidth, outputHeight, onProgress) {
-    const {offset, lift, outline, channel, lineClass, level, guard, scale, gw, gh} = plan;
+    const {offset, lift, outline, wet, channel, lineClass, level, guard, scale, gw, gh} = plan;
     const sx = (gw - 1) / (outputWidth - 1), sy = (gh - 1) / (outputHeight - 1);
     const lifted = new Uint8Array(width * height);
     const halfWidth = RIVER_LINE_WIDTH / GAME_METERS_PER_PIXEL / 2, nearest = (i, j) =>
@@ -1352,9 +1357,12 @@ var heightmapExport = (function () {
         } else if (heights[k] > level && heights[k] <= level + LEVEL_WATER_TOLERANCE && heights[k] <= channelSurface(channel, a, gw, fx, fy) + CHANNEL_SURFACE_TOLERANCE) {
           // NOAA still gives these their beds.
           heights[k] = level;
-        } else if (before > level && heights[k] < Math.min(before, level + guard)) {
-          // At small height scales the guard spans whole plains, which lowering spilling over from nearby rivers would otherwise drown.
-          heights[k] = Math.min(before, level + guard);
+        } else if (before > level + guard && heights[k] < level + guard) {
+          heights[k] = level + guard;
+        } else if (before > level && heights[k] < level &&
+          (wet[a] * (1 - fx) + wet[a + 1] * fx) * (1 - fy) + (wet[a + gw] * (1 - fx) + wet[a + gw + 1] * fx) * fy < -LOWERED_GROWTH) {
+          // At small height scales the guard spans whole plains. Land away from the planned water keeps its height instead of drowning in lowering spilled from rivers.
+          heights[k] = before;
         }
         if (line && heights[k] > level) {
           heights[k] = Math.min(heights[k], level + guard + (lineDistance - halfWidth) * GAME_METERS_PER_PIXEL * RIVER_BANK_GRADE / scale);
@@ -1563,7 +1571,7 @@ var heightmapExport = (function () {
         return yieldToPage();
       });
       const areas = rowAreas(region, width, height), bedKm2 = beds.reduce((sum, cells, y) => sum + cells * areas[y], 0) / 1e6;
-      if (bedKm2) bathymetry += ', beds estimated under ' + bedKm2.toFixed(1) + ' km2 of water without depth data';
+      if (bedKm2 >= 0.05) bathymetry += ', beds estimated under ' + bedKm2.toFixed(1) + ' km2 of water without depth data';
     }
     if (smoothing) {
       onStage('Smoothing terrain...', 0);

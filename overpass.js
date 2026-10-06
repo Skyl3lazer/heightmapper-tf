@@ -37,8 +37,8 @@ var overpass = (function () {
   // The nodes inside bounds matching an Overpass tag filter such as ["natural"="volcano"].
   // A box around the whole world is left out, since Overpass searches everywhere about twice as fast, and callers drop nodes outside their box.
   function nodes(bounds, filter) {
-    const boxes = bboxes(bounds);
-    const parts = boxes[0][3] - boxes[0][1] >= 360 ? `node${filter};` : boxes.map(b => `node${filter}(${b.join(',')});`).join('');
+    // A box capped at one copy of the world comes out a hair under 360 degrees wide.
+    const parts = bounds.east - bounds.west >= 360 - 1e-3 ? `node${filter};` : bboxes(bounds).map(b => `node${filter}(${b.join(',')});`).join('');
     return run(`[out:json][timeout:90];(${parts});out qt;`);
   }
 
