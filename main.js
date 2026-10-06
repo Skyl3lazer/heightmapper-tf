@@ -206,11 +206,6 @@ map = (function () {
       showLiftRow();
       runAnalysis();
     });
-    normalizationRow.__li.title = [
-      'The game has one water level, so rivers and lakes above it come out dry.',
-      'This lowers them onto the water level, with the land around them, so they fill along their whole length.',
-      'With ocean data on, lowered water will embed into the terrain with a slope that deepens gradually from the shore, up to 10 m.'
-    ].join('\n');
     showSign(addSign(normalizationRow, 'experimental'), 'Experimental: Water normalization that keeps rivers and other bodies of water at a singular water level, ' +
       'blending surrounding terrain, to maintain waterways across real world elevation changes.');
     exportFolder.add(gui, 'normalizationLift', 0, 200).step(1).name('max water displacement (m)').onFinishChange(runAnalysis);
