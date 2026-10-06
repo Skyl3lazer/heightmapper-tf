@@ -414,8 +414,12 @@ map = (function () {
     return heightmapExport.groundWidth(exportBounds()) / (outputSize().width - 1);
   }
 
+  function realSize(bounds) {
+    return (heightmapExport.groundWidth(bounds) / 1000).toFixed(2) + ' x ' + (heightmapExport.groundHeight(bounds) / 1000).toFixed(2) + ' km';
+  }
+
   function updateExportBox() {
-    var r = exportBoxRect(), out = outputSize(), mpp = metersPerPixel();
+    var r = exportBoxRect(), mpp = metersPerPixel();
     var box = document.getElementById('export-box');
     box.style.left = r.left + 'px';
     box.style.top = r.top + 'px';
@@ -423,8 +427,7 @@ map = (function () {
     box.style.height = r.height + 'px';
     var image = imageSize();
     document.getElementById('export-box-size').textContent = image.width + ' x ' + image.height + ' px' +
-      (northLeft() ? ' with north on the left' : '') + ', real ' +
-      (mpp * (out.width - 1) / 1000).toFixed(2) + ' x ' + (mpp * (out.height - 1) / 1000).toFixed(2) + ' km';
+      (northLeft() ? ' with north on the left' : '') + ', real ' + realSize(exportBounds());
 
     var center = map.getCenter();
     gui.center = center.lat.toFixed(6) + ', ' + center.lng.toFixed(6);
@@ -1112,7 +1115,7 @@ map = (function () {
       'water depth: ' + (m.bathymetry || (job.oceans ? 'no water on the map' : 'ocean data off, below sea level clamped to 0 m')) +
         (job.smoothing ? ', land smoothed over ' + job.smoothing + ' in-game m' : '') + normalizationNote(m.waterNormalization, r.rivers),
       m.cappedFraction > 0 ? (m.cappedFraction * 100).toFixed(2) + '% of the map was above the game\'s ' + GAME_MAX_HEIGHT + ' m limit and was flattened. Lower the height scale to keep those peaks.' : null,
-      'real ' + (job.mpp * (job.out.width - 1) / 1000).toFixed(2) + ' x ' + (job.mpp * (job.out.height - 1) / 1000).toFixed(2) + ' km at ' + m.metersPerPixel.toFixed(3) + ' m/px',
+      'real ' + realSize(job.bounds) + ' at ' + m.metersPerPixel.toFixed(3) + ' m/px',
       'center ' + m.centerLat.toFixed(6) + ', ' + m.centerLng.toFixed(6),
       'bounds W ' + m.west.toFixed(6) + ' S ' + m.south.toFixed(6) + ' E ' + m.east.toFixed(6) + ' N ' + m.north.toFixed(6),
       'source zoom ' + m.sourceZoom + (m.upsampled ? ' (output is finer than the source data, upsampled)' : '')

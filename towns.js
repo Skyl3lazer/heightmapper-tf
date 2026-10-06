@@ -219,7 +219,7 @@ var townExport = (function () {
 
     const centerLng = (bounds.west + bounds.east) / 2;
     const candidates = [];
-    const areaKm2 = heightmapExport.groundWidth(bounds) ** 2 * (height - 1) / (width - 1) / 1e6;
+    const areaKm2 = heightmapExport.groundWidth(bounds) * heightmapExport.groundHeight(bounds) / 1e6;
     let towns = [], skipped = [], nudgesDone = 0, nudgesDue = 0, note = null;
     for (const [tag, plural, maxKm2] of includeVillages ? PLACE_TIERS : PLACE_TIERS.slice(0, 2)) {
       if (areaKm2 > maxKm2) {

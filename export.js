@@ -1577,6 +1577,10 @@ var heightmapExport = (function () {
     groundWidth: function (bounds) {
       return groundWidth(boundsToRegion(bounds));
     },
+    // Ground meters from the north edge to the south edge, along a meridian. Web Mercator stretches it, so it can't come from the meters per pixel.
+    groundHeight: function (bounds) {
+      return (bounds.north - bounds.south) / 360 * EARTH_CIRCUMFERENCE;
+    },
     analyze: analyze,
     render: render,
     renderBiomes: renderBiomes,
