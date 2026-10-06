@@ -42,9 +42,13 @@ var heightmapExport = (function () {
   // In-game meters. OpenStreetMap rivers too narrow for land cover are cut as channels this wide.
   const RIVER_LINE_WIDTH = 16;
   // Real meters a river line may still sit above the level after lowering and be cut. A line drawn up a valley wall would cut a gash.
-  const RIVER_LINE_TOLERANCE = 5;
+  const RIVER_LINE_TOLERANCE = 15;
+  // The in-game slope the land beside a cut river channel may rise at, so its banks slope instead of standing as walls.
+  const RIVER_BANK_GRADE = 0.5;
   // In-game meters.
   const BED_MAX_DEPTH = 10;
+  // Share of a water body NOAA must give real depths for before its very shallow spots count as real shallows rather than missing data.
+  const SURVEYED_SHARE = 0.2;
   // Rows of a full-size grid between progress reports, each a moment the page can repaint.
   const ROW_BATCH = 256;
   // Transport Fever 3 writes biomes 0 to 4 as these gray levels.
@@ -628,9 +632,10 @@ var heightmapExport = (function () {
   // Cells at or below submerge.level take NOAA depths, and every one ends at or below submerge.top so it sits under the water.
   // onProgress(fraction): as for fetchImageServer.
   // lowered: optional, cells water normalization lowered. Their NOAA values describe the old height, so they are left for layBeds.
+  // Returns a note, and on NOAA's grid the water bodies it surveyed, as {grid, width, height}, or null.
   async function applyBathymetry(heights, width, height, region, submerge, onProgress, lowered) {
     const {level, top} = submerge;
-    if (!heights.some(h => h <= level)) return 'no water below the water level';
+    if (!heights.some(h => h <= level)) return {note: 'no water below the water level', surveyed: null};
     const {width: bw, height: bh} = rasterSize(width, height);
     let depth = null, note = 'NOAA water depths applied';
     try {
@@ -655,7 +660,27 @@ var heightmapExport = (function () {
         heights[k] = Math.min(plausible(d) ? d : heights[k], top);
       }
     }
-    return note;
+    return {note: note, surveyed: depth ? surveyedWater(heights, width, height, depth, bw, bh, level, top) : null};
+  }
+
+  // Marks the cells of NOAA's grid in water bodies it gives real depths for across at least SURVEYED_SHARE of their area.
+  // NOAA repeats the surface of water it has no survey of, like most lakes, which would otherwise read as very shallow water.
+  function surveyedWater(heights, width, height, depth, bw, bh, level, top) {
+    const water = new Uint8Array(bw * bh);
+    for (let j = 0; j < bh; j++) {
+      const row = Math.round(j * (height - 1) / (bh - 1)) * width;
+      for (let i = 0; i < bw; i++) if (heights[row + Math.round(i * (width - 1) / (bw - 1))] <= level) water[j * bw + i] = 1;
+    }
+    const {labels, count} = label(water, bw, bh);
+    const cells = new Float64Array(count + 1), measured = new Float64Array(count + 1);
+    for (let i = 0; i < bw * bh; i++) {
+      if (!labels[i]) continue;
+      cells[labels[i]]++;
+      if (plausible(depth[i]) && depth[i] < top) measured[labels[i]]++;
+    }
+    const grid = new Uint8Array(bw * bh);
+    for (let i = 0; i < bw * bh; i++) if (labels[i] && measured[labels[i]] >= SURVEYED_SHARE * cells[labels[i]]) grid[i] = 1;
+    return {grid: grid, width: bw, height: bh};
   }
 
   // Half-width r and edge share of three box passes that together blur with a standard deviation of sigma pixels.
@@ -1186,7 +1211,7 @@ var heightmapExport = (function () {
       const w = Math.max(0, 1 - distance[i] * gameCell / (2 * NORMALIZE_SEAM));
       offset[i] = exact[i] * w + offset[i] * (1 - w);
     }
-    return {offset: offset, lowered: lowered, channel: channel, lineClass: lineClass, level: level, guard: guard, gw: gw, gh: gh, stats: stats};
+    return {offset: offset, lowered: lowered, channel: channel, lineClass: lineClass, level: level, guard: guard, scale: scale, gw: gw, gh: gh, stats: stats};
   }
 
   // Fetches land cover and plans water normalization for an output. heights: real meters for the whole output, or null to fetch coarser ones.
@@ -1254,20 +1279,23 @@ var heightmapExport = (function () {
   // The grid covers output pixels x0 to x0 + width - 1 and y0 to y0 + height - 1 of an output outputWidth x outputHeight.
   // onProgress(fraction): optional, called every ROW_BATCH rows, and awaited.
   async function applyWaterPlan(plan, heights, width, height, x0, y0, outputWidth, outputHeight, onProgress) {
-    const {offset, lowered, channel, lineClass, level, guard, gw, gh} = plan;
+    const {offset, lowered, channel, lineClass, level, guard, scale, gw, gh} = plan;
     const sx = (gw - 1) / (outputWidth - 1), sy = (gh - 1) / (outputHeight - 1);
     const lifted = new Uint8Array(width * height);
-    const river = plan.lines ? drawLines(plan.lines, 1, 1, x0, y0, width, height, RIVER_LINE_WIDTH / GAME_METERS_PER_PIXEL / 2) : null;
+    const halfWidth = RIVER_LINE_WIDTH / GAME_METERS_PER_PIXEL / 2, nearest = (i, j) =>
+      Math.round(Math.min(gh - 1, Math.max(0, (y0 + j) * sy))) * gw + Math.round(Math.min(gw - 1, Math.max(0, (x0 + i) * sx)));
+    const near = plan.lines ? nearestLine(drawLines(plan.lines, 1, 1, x0, y0, width, height, 0), width, height, (i, j) => lineClass[nearest(i, j)]) : null;
     for (let j = 0; j < height; j++) {
       const v = Math.min(gh - 1, Math.max(0, (y0 + j) * sy)), r = Math.min(Math.floor(v), gh - 2), fy = v - r;
       for (let i = 0; i < width; i++) {
         const u = Math.min(gw - 1, Math.max(0, (x0 + i) * sx)), c = Math.min(Math.floor(u), gw - 2), fx = u - c, a = r * gw + c;
         const k = j * width + i, before = heights[k];
         heights[k] -= (offset[a] * (1 - fx) + offset[a + 1] * fx) * (1 - fy) + (offset[a + gw] * (1 - fx) + offset[a + gw + 1] * fx) * fy;
-        const line = river && river[k] ? lineClass[Math.round(v) * gw + Math.round(u)] : 0;
-        if (line && heights[k] <= level + RIVER_LINE_TOLERANCE) {
+        const lineDistance = near ? near.distance[k] / 3 : Infinity, line = lineDistance < 85 ? near.kind[k] : 0;
+        if (line && lineDistance <= halfWidth && heights[k] <= level + RIVER_LINE_TOLERANCE) {
           heights[k] = level;
           if (line === 2) lifted[k] = 1;
+          continue;
         } else if ((lowered[a] || lowered[a + 1] || lowered[a + gw] || lowered[a + gw + 1]) && heights[k] <= level + NORMALIZE_SURFACE_TOLERANCE) {
           // The coarse land cover picks out the water. The full-resolution surface draws its exact shoreline.
           heights[k] = level;
@@ -1278,10 +1306,53 @@ var heightmapExport = (function () {
         } else if (before > level + guard && heights[k] < level + guard) {
           heights[k] = level + guard;
         }
+        if (line && heights[k] > level) {
+          heights[k] = Math.min(heights[k], level + guard + (lineDistance - halfWidth) * GAME_METERS_PER_PIXEL * RIVER_BANK_GRADE / scale);
+        }
       }
       if (onProgress && j % ROW_BATCH === ROW_BATCH - 1) await onProgress((j + 1) / height);
     }
     return lifted;
+  }
+
+  // Chamfer distance in thirds of a pixel to the nearest marked line pixel, up to 85 pixels, and kind(i, j) of that pixel, which is 0 for lines to leave alone.
+  function nearestLine(marks, width, height, kind) {
+    const distance = new Uint8Array(width * height).fill(255), kinds = new Uint8Array(width * height);
+    for (let j = 0; j < height; j++) {
+      for (let i = 0; i < width; i++) {
+        const k = j * width + i;
+        if (marks[k] && (kinds[k] = kind(i, j))) distance[k] = 0;
+      }
+    }
+    const relax = (k, n, step) => {
+      if (distance[n] + step < distance[k]) {
+        distance[k] = distance[n] + step;
+        kinds[k] = kinds[n];
+      }
+    };
+    for (let j = 0; j < height; j++) {
+      for (let i = 0; i < width; i++) {
+        const k = j * width + i;
+        if (i > 0) relax(k, k - 1, 3);
+        if (j > 0) {
+          relax(k, k - width, 3);
+          if (i > 0) relax(k, k - width - 1, 4);
+          if (i < width - 1) relax(k, k - width + 1, 4);
+        }
+      }
+    }
+    for (let j = height - 1; j >= 0; j--) {
+      for (let i = width - 1; i >= 0; i--) {
+        const k = j * width + i;
+        if (i < width - 1) relax(k, k + 1, 3);
+        if (j < height - 1) {
+          relax(k, k + width, 3);
+          if (i < width - 1) relax(k, k + width + 1, 4);
+          if (i > 0) relax(k, k + width - 1, 4);
+        }
+      }
+    }
+    return {distance: distance, kind: kinds};
   }
 
   // A channel's surface between the four plan cells around a pixel, from the ones that have one, or NaN.
@@ -1298,11 +1369,14 @@ var heightmapExport = (function () {
   }
 
   // Lays an estimated bed under water the data gives no depth for, since elevation data only records a water surface.
-  // That is water normalization lowered, and water applyBathymetry left at its flat top. The bed deepens from the shore.
-  // submerge: as for applyBathymetry. gameCell: in-game meters per cell. Returns how many cells got a bed.
+  // That is water normalization lowered, and water applyBathymetry left at its flat top outside the bodies NOAA surveyed.
+  // The bed deepens from the shore. submerge: as for applyBathymetry. surveyed: as applyBathymetry returns it, or null.
+  // gameCell: in-game meters per cell. Returns how many cells got a bed.
   // onProgress(fraction): optional, called every ROW_BATCH rows of each pass, and awaited.
-  async function layBeds(heights, width, height, submerge, lowered, gameCell, scale, onProgress) {
+  async function layBeds(heights, width, height, submerge, lowered, surveyed, gameCell, scale, onProgress) {
     const {level, top} = submerge, flat = Math.fround(top);
+    const sx = surveyed ? (surveyed.width - 1) / (width - 1) : 0, sy = surveyed ? (surveyed.height - 1) / (height - 1) : 0;
+    const unsurveyed = (x, y) => !surveyed || !surveyed.grid[Math.round(y * sy) * surveyed.width + Math.round(x * sx)];
     // Chamfer distance to the shore in thirds of a cell, which reaches past the deepest bed.
     const d = new Uint8Array(heights.length);
     for (let i = 0; i < d.length; i++) d[i] = heights[i] <= level ? 255 : 0;
@@ -1334,7 +1408,7 @@ var heightmapExport = (function () {
           if (x > 0) v = Math.min(v, d[i + width - 1] + 4);
         }
         d[i] = v;
-        if ((lowered && lowered[i]) || heights[i] === flat) {
+        if ((lowered && lowered[i]) || (heights[i] === flat && unsurveyed(x, y))) {
           heights[i] = Math.min(heights[i], top - Math.min(BED_MAX_DEPTH, NORMALIZE_GRADE * gameCell * v / 3) / scale);
           beds++;
         }
@@ -1379,8 +1453,9 @@ var heightmapExport = (function () {
     }
     let bathymetry = null;
     if (sea) {
-      bathymetry = await applyBathymetry(heights, width, height, region, sea, null, lifted);
-      await layBeds(heights, width, height, sea, lifted, gameCell, scale);
+      const depths = await applyBathymetry(heights, width, height, region, sea, null, lifted);
+      bathymetry = depths.note;
+      await layBeds(heights, width, height, sea, lifted, depths.surveyed, gameCell, scale);
     }
     if (smoothing) await smoothLand(heights, width, height, smoothing * (width - 1) / (outputWidth - 1), sea ? sea.level : -Infinity);
     if (sea || smoothing || lifted) extremes = clampAndMeasure(heights, floor, ceiling);
@@ -1428,10 +1503,11 @@ var heightmapExport = (function () {
     let bathymetry = null;
     if (submerge) {
       onStage('Fetching water depths...');
-      bathymetry = await applyBathymetry(heights, width, height, region, submerge, f => onStage('Fetching water depths...', f), lifted);
+      const depths = await applyBathymetry(heights, width, height, region, submerge, f => onStage('Fetching water depths...', f), lifted);
+      bathymetry = depths.note;
       onStage('Laying water beds...', 0);
       await yieldToPage();
-      const beds = await layBeds(heights, width, height, submerge, lifted, GAME_METERS_PER_PIXEL, scale, f => {
+      const beds = await layBeds(heights, width, height, submerge, lifted, depths.surveyed, GAME_METERS_PER_PIXEL, scale, f => {
         onStage('Laying water beds...', f);
         return yieldToPage();
       });

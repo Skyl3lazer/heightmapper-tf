@@ -32,7 +32,8 @@ map = (function () {
   const TOWN_NUDGE_REACH = 200;
   // In-game meters. Shorter rivers are left out of water normalization, so maps covering a lot of real ground only fetch rivers that show at their scale.
   const RIVER_MIN_LENGTH = 2000;
-  const SIGN_GLYPHS = {warning: '\u26a0\ufe0e', info: '\u24d8'};
+  // Unicode has no Erlenmeyer flask, so experimental options take the alembic, another piece of lab glassware.
+  const SIGN_GLYPHS = {warning: '\u26a0\ufe0e', info: '\u24d8', experimental: '\u2697\ufe0e'};
   const SETTINGS_KEY = 'heightmapper-settings', CONSENT_KEY = 'heightmapper-remember';
   // Panel choices kept between visits. Climate, the heights and the view follow the place on the map, so they aren't kept.
   const SAVED_SETTINGS = ['include_oceans', 'reference_map', 'mapSize', 'ratio', 'orientation', 'scaleMode', 'smoothing', 'oceanFloor', 'bitDepth',
@@ -200,13 +201,19 @@ map = (function () {
     heightScaleHint = addSign(heightScaleRow, 'info');
     var steepnessRow = onEdit(exportFolder.add(gui, 'steepness').name('steepness (x real)'), scaleChanged);
     steepnessWarning = addSign(steepnessRow, 'warning');
-    exportFolder.add(gui, 'smoothing', 0, 20).step(0.5).name('smoothing (m)').onFinishChange(runAnalysis);
+    var smoothingRow = exportFolder.add(gui, 'smoothing', 0, 20).step(0.5).name('smoothing (m)').onFinishChange(runAnalysis);
+    // This dat.gui version shows a number to the decimals of its starting value, which would round half meters away.
+    smoothingRow.__precision = 2;
+    smoothingRow.updateDisplay();
     onEdit(exportFolder.add(gui, 'oceanFloor').name('ocean floor (m)'), runAnalysis);
-    exportFolder.add(gui, 'waterNormalization').name('water normalization').onChange(runAnalysis).__li.title = [
+    var normalizationRow = exportFolder.add(gui, 'waterNormalization').name('water normalization').onChange(runAnalysis);
+    normalizationRow.__li.title = [
       'The game has one water level, so rivers and lakes above it come out dry.',
       'This lowers them onto the water level, with the land around them, so they fill along their whole length.',
       'With ocean data on, lowered water will embed into the terrain with a slope that deepens gradually from the shore, up to 10 m.'
     ].join('\n');
+    showSign(addSign(normalizationRow, 'experimental'), 'Experimental: Water normalization that keeps rivers and other bodies of water at a singular water level, ' +
+      'blending surrounding terrain, to maintain waterways across real world elevation changes.');
     bitDepthHint = addSign(exportFolder.add(gui, 'bitDepth', [16, 8]).name('bit depth').onChange(updateHints), 'info');
     // dat.gui only recognizes plain functions as buttons, not async ones.
     gui.exportHeightmap = function () { exportRegion(); };
