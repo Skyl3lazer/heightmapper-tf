@@ -8,7 +8,7 @@ map = (function () {
   var moving = false;
   var analysis = null;
   var analysisGeneration = 0;
-  // What the user typed into whichever of height scale and steepness "scale by" picks. Auto mode may show less so high peaks fit under the game's limit.
+  // What the user typed into the field "scale by" picks. Auto mode may show less there so high peaks fit under the game's limit.
   var requestedText = '1';
   var steepnessWarning, heightScaleHint, climateHint, waterHint, bitDepthHint, scaleCapHint, townNamesHint;
   var signs = [];
@@ -30,23 +30,23 @@ map = (function () {
   const STEEPNESS_WARNING = 4;
   // In-game meters the nudge options may move a town to find a spot where its first street works.
   const TOWN_NUDGE_REACH = 200;
-  // In-game meters. Shorter rivers are left out of water normalization, so maps covering a lot of real ground only fetch rivers that show at their scale.
+  // In-game meters. Shorter rivers are left out of water normalization. A map covering a lot of real ground then only fetches rivers that show at its scale.
   const RIVER_MIN_LENGTH = 2000;
   // Natural Earth ranks rivers by the web map zoom they first show at. A map takes them this many zoom levels later, which gives a world map its few dozen greatest rivers.
   const NATURAL_EARTH_ZOOM_LAG = 1.8;
-  // Real meters Natural Earth's simplified courses can stray from their river, so they move onto land cover water that close.
+  // Real meters Natural Earth's simplified courses can stray from their river. They move onto land cover water this close.
   const NATURAL_EARTH_SLACK = 2500;
-  // Unicode has no Erlenmeyer flask, so experimental options take the alembic, another piece of lab glassware.
+  // Unicode has no Erlenmeyer flask. Experimental options take the alembic, another piece of lab glassware.
   const SIGN_GLYPHS = {warning: '\u26a0\ufe0e', info: '\u24d8', experimental: '\u2697\ufe0e'};
   const SETTINGS_KEY = 'heightmapper-settings', CONSENT_KEY = 'heightmapper-remember';
-  // Panel choices kept between visits. Climate, the heights and the view follow the place on the map, so they aren't kept.
+  // Climate, the heights and the view are left out because they follow the place on the map.
   const SAVED_SETTINGS = ['include_oceans', 'reference_map', 'mapSize', 'ratio', 'orientation', 'scaleMode', 'smoothing', 'oceanFloor', 'bitDepth',
     'waterNormalization', 'maxTowns', 'townSpacing', 'includeVillages', 'townNames', 'townSafety', 'fileName'];
-  // The game has one water level, so a lake's level drowns all lower land. Auto mode skips levels drowning more than this share of the map.
+  // The game has one water level. A lake's level drowns all lower land. Auto mode skips levels drowning more than this share of the map.
   const MAX_FLOOD_SHARE = 0.15;
-  // ...and levels drowning more than this many times the water body's own area, like a tiny flat patch at the bottom of a dry valley.
+  // Auto mode also skips levels drowning more than this many times the water body's own area, like a tiny flat patch at the bottom of a dry valley.
   const MAX_FLOOD_RATIO = 4;
-  // A level from a river's lowest point raises all dry land below it, so more than this share of the map there means the river reading is off.
+  // A level from a river's lowest point raises all dry land below it. More than this share of the map below it means the river reading is off.
   const RIVER_FLOOD_SHARE = 0.02;
   // Official in-game size in km, [short side, long side], for each ratio 1:1 to 1:5.
   const MAP_SIZES = {
@@ -60,27 +60,21 @@ map = (function () {
     'Gigantomaniac (TF3)': [[28, 28], [20, 40], [16, 48], [14, 56], [12.5, 62.5]]
   };
   
-  /*** URL parsing ***/
-  
-  // leaflet-style URL hash pattern:
-  // #[zoom],[lat],[lng]
+  // L.Hash writes #zoom/lat/lng.
   var url_hash = window.location.hash.slice(1, window.location.hash.length).split('/');
   
   if (url_hash.length == 3) {
     map_start_location = [url_hash[1],url_hash[2], url_hash[0]];
-    // convert from strings
     map_start_location = map_start_location.map(Number);
   }
   
   var query = splitQueryParams();
-  // { language: 'en', this: 'no'}
-  
+
   function splitQueryParams () {
     var str = window.location.search;
     
     var kvArray = str.slice(1).split('&');
-    // ['language=en', 'this=no']
-    
+
     var obj = {};
     
     for (var i = 0, j=kvArray.length; i<j; i++) {
@@ -94,8 +88,6 @@ map = (function () {
     return obj;
   }
   
-  /*** Map ***/
-  
   var map = L.map('map',
   {"keyboardZoomOffset" : .05,
   "inertiaDeceleration" : 10000,
@@ -107,7 +99,6 @@ map = (function () {
     attribution: 'Map by <a href="https://mapzen.com/tangram" target="_blank">Tangram</a>, for TF by <a href="https://linktr.ee/skyl3lazer" target="_blank">Skyl3lazer</a> | <a href="https://github.com/tangrams/heightmapper" target="_blank">Fork This</a>'
   });
   
-  // from https://davidwalsh.name/javascript-debounce-function
   function debounce(func, wait, immediate) {
     var timeout;
     return function() {
@@ -136,7 +127,6 @@ map = (function () {
   if (startAtDefaults) {
     map.setView([exportDefaults.lat, exportDefaults.lng], 10);
   } else {
-    // setView expects format ([lat, long], zoom)
     map.setView(map_start_location.slice(0, 3), map_start_location[2]);
   }
   
@@ -149,10 +139,9 @@ map = (function () {
   });
   var townLayer = L.layerGroup();
 
-  // Create dat GUI
   var gui;
   function addGUI () {
-    gui.domElement.parentNode.style.zIndex = 5; // make sure GUI is on top of map
+    gui.domElement.parentNode.style.zIndex = 5;
     window.gui = gui;
     // Text fields because this dat.gui version rounds number boxes to the precision of their initial value.
     gui.maxHeight = '';
@@ -265,7 +254,6 @@ map = (function () {
 
     setUpRemembering();
     gui.help = function () {
-      // show help screen and input blocker
       toggleHelp(true);
     }
     gui.add(gui, 'help');
@@ -353,7 +341,7 @@ map = (function () {
     return gui.orientation == 'landscape' ? {width: longSide, height: shortSide} : {width: shortSide, height: longSide};
   }
 
-  // The game always runs a map's long side top to bottom, so landscape exports are turned with north on the left.
+  // The game always runs a map's long side top to bottom. Landscape exports are turned with north on the left.
   function northLeft() {
     var out = outputSize();
     return out.width > out.height;
@@ -366,7 +354,7 @@ map = (function () {
   }
 
   // Largest rectangle of the output's aspect ratio that fits the map with a margin, in container pixels.
-  // capped: the box would be larger than one copy of the world, so it stops at the world's size instead.
+  // capped: the box would be larger than one copy of the world. It stops at the world's size instead.
   function exportBoxRect() {
     var size = map.getSize(), out = outputSize();
     var aspect = (out.width - 1) / (out.height - 1);
@@ -410,7 +398,7 @@ map = (function () {
     if (Math.abs(shift) > 0.01) map.setView(map.unproject([center.x, center.y + shift], zoom), zoom, {reset: true});
   }
 
-  // Leaflet's maxBounds limits the whole view, not a box inside it, so drags are limited here.
+  // Leaflet's maxBounds limits the whole view, not a box inside it. Drags are limited here instead.
   function limitDrag() {
     var r = exportBoxRect();
     this._newPos.y -= boxOverflow(r.top - this._newPos.y + map.getPixelOrigin().y, r.height);
@@ -526,7 +514,7 @@ map = (function () {
     return String(Number((k * mpp / GAME_METERS_PER_PIXEL).toPrecision(3)));
   }
 
-  // What "scale by" asks for, checked, with the real meters per pixel that steepness depends on.
+  // Carries the real meters per pixel, since steepness depends on it.
   function scaleRequest() {
     var value = Number(requestedText);
     if (!(value > 0)) throw new Error(gui.scaleMode + ' must be a positive number');
@@ -534,7 +522,7 @@ map = (function () {
     return {mode: gui.scaleMode, value: value, mpp: metersPerPixel()};
   }
 
-  // The height scale a request asks for. peak: the real terrain's highest point in meters.
+  // peak: the real terrain's highest point in meters.
   function scaleFor(request, peak) {
     if (request.mode == 'steepness') return request.value * GAME_METERS_PER_PIXEL / request.mpp;
     if (request.mode == 'max height') {
@@ -569,8 +557,7 @@ map = (function () {
     controller('steepness').updateDisplay();
   }
 
-  // dat.gui reports a finished edit whenever a text field loses focus, so the handler only runs when the text changed.
-  // Otherwise clicking through a field that shows a fitted value would make that value the request.
+  // dat.gui reports a finished edit on every blur. Clicking through a field that shows a fitted value would make that value the request.
   function onEdit(controller, handler) {
     var input = controller.domElement.querySelector('input');
     var before = input.value;
@@ -583,7 +570,6 @@ map = (function () {
     });
   }
 
-  // A caution or information sign after a field's name, hidden until shown.
   function addSign(row, kind) {
     var name = row.domElement.parentNode.querySelector('.property-name');
     var sign = document.createElement('span');
@@ -611,7 +597,6 @@ map = (function () {
     showNotices();
   }
 
-  // The box label's last rows list the fields showing each kind of sign.
   function showNotices() {
     var box = document.getElementById('export-box-notices');
     box.textContent = '';
@@ -630,7 +615,6 @@ map = (function () {
       'Steepness values above ' + STEEPNESS_WARNING + ' can look out of place, consider changing your "scale by"' : null);
   }
 
-  // Information signs on fields set away from what the analysis would pick.
   function updateHints() {
     var climate = analysis ? suggestClimate(analysis) : null;
     showSign(climateHint, climate && climate != gui.climate ? 'The suggested climate is ' + climate : null);
@@ -671,7 +655,6 @@ map = (function () {
     return floor;
   }
 
-  // Lowers the requested scale just enough for the peak to fit under the game's limit.
   function fittedScale(requested, peak) {
     return scaleDigits(requested * peak > GAME_MAX_HEIGHT ? GAME_MAX_HEIGHT / peak : requested);
   }
@@ -716,7 +699,7 @@ map = (function () {
     if (label.offsetHeight > document.getElementById('export-box').offsetTop) label.classList.add('inside');
   }
 
-  // The notice rows describe the last analysis, so they hide while a new one runs.
+  // The notice rows describe the last analysis. They hide while a new one runs.
   function setMeasuring(on) {
     document.getElementById('export-box-label').classList.toggle('measuring', on);
     placeBoxLabel();
@@ -779,8 +762,8 @@ map = (function () {
     return choice ? choice.waterline - SHORE_TOLERANCE : null;
   }
 
-  // Dry land enclosed below sea level is raised above it instead of drowning, so the sea needs no flood limit. Raising land to a lake's level would flatten whole valleys.
-  // normalizing: water normalization is on, which can lower a river onto its lowest point, so that point can serve as the level.
+  // Dry land enclosed below sea level is raised above it instead of drowning. The sea therefore needs no flood limit. Raising land to a lake's level would flatten whole valleys.
+  // normalizing: water normalization can lower a river onto its lowest point, which then serves as the level.
   function autoWaterChoice(choices, areaKm2, normalizing) {
     return choices.filter(function(c) {
       return c.river ? normalizing && c.flood <= RIVER_FLOOD_SHARE : c.sea || (c.flood <= MAX_FLOOD_SHARE && c.flood * areaKm2 <= MAX_FLOOD_RATIO * c.areaKm2);
@@ -816,8 +799,8 @@ map = (function () {
     }
     var choices = waterChoices(analysis.water, k, analysis.floodShare, gui.include_oceans);
     // The lowest river water is only worth showing when no other level qualifies.
-    var levelled = autoWaterChoice(choices.filter(function(c) { return !c.river; }), analysis.areaKm2, false);
-    var shown = choices.filter(function(c) { return c.river ? !levelled : c === levelled || c === choices[0] || c.areaKm2 >= 0.1; });
+    var leveled = autoWaterChoice(choices.filter(function(c) { return !c.river; }), analysis.areaKm2, false);
+    var shown = choices.filter(function(c) { return c.river ? !leveled : c === leveled || c === choices[0] || c.areaKm2 >= 0.1; });
     var depthNote = analysis.bathymetry && /unavailable/.test(analysis.bathymetry) ? ' (' + analysis.bathymetry + ')' : '';
     if (!shown.length) {
       setBoxWater('no flat water surfaces found' + depthNote);
@@ -862,9 +845,7 @@ map = (function () {
     updateDisplayRange();
   }
 
-  // In-game minimum, maximum and water level for an analysis at height scale k.
-  // max: the in-game maximum to keep, or null to measure it.
-  // normalizing: as for autoWaterChoice.
+  // max: the in-game maximum to keep, or null to measure it. normalizing: as for autoWaterChoice.
   function heightsFor(a, k, carved, max, normalizing) {
     var min = Math.max(GAME_MIN_HEIGHT, Math.floor(k * a.min));
     max = Math.min(GAME_MAX_HEIGHT, Math.max(min + 1, max || Math.ceil(k * a.max)));
@@ -895,7 +876,7 @@ map = (function () {
     updateDisplayRange();
   }
 
-  // The map shades real elevations, so the in-game range is divided back by the height scale.
+  // The map shades real elevations. The in-game range is divided back by the height scale.
   function updateDisplayRange() {
     var h = readHeights();
     var uniforms = scene.styles.hillshade.shaders.uniforms;
@@ -946,7 +927,6 @@ map = (function () {
         task.state = 'failed';
         console.error(e);
       }
-      // Only the newest result stays expanded.
       tasks.forEach(function(t) { if (t !== task && t.state != 'queued') t.open = false; });
       renderTasks();
     }
@@ -1020,7 +1000,6 @@ map = (function () {
     return e;
   }
 
-  // Everything an export reads, taken when it's queued.
   function exportJob(needsHeights) {
     var out = outputSize();
     return {
@@ -1047,12 +1026,12 @@ map = (function () {
   }
 
   async function buildHeightmap(job, report) {
-    // The fields only hold the in-game water level, so auto mode takes the waterline from the analysis.
+    // The fields only hold the in-game water level. Auto mode takes the waterline from the analysis.
     var h = job.auto && job.analysis ? heightsFor(job.analysis, job.heights.k, job.oceans, fixedMax(job.request), job.waterNormalization) :
       Object.assign({waterline: job.heights.water / job.heights.k}, job.heights);
     var meta = {heightScale: h.k, waterLevel: h.water, smoothing: job.smoothing};
     var rivers = job.waterNormalization ? await riverLines(job, report) : {lines: null, note: null};
-    // A water level under the minimum means the map has no water, so nothing is carved and the level follows the final minimum.
+    // A water level under the minimum means the map has no water. Nothing is carved. The level follows the final minimum.
     var dry = h.water < h.min;
     var lowered = false;
     report('Fetching elevation tiles...', 0);
@@ -1160,7 +1139,7 @@ map = (function () {
           lat += steps[p];
           lng += steps[p + 1];
           var point = [lat / 1000, lng / 1000 + 360 * Math.round((centerLng - lng / 1000) / 360)];
-          // Points move to the box's copy of the world, so a line crossing the far side of it from the box's center is cut there.
+          // Points move to the box's copy of the world. A line crossing the far side of it from the box's center is cut there.
           if (line.length && Math.abs(point[1] - line[line.length - 1][1]) > 180) finish();
           line.push(point);
           inside = inside || (point[0] <= bounds.north && point[0] >= bounds.south && point[1] >= bounds.west && point[1] <= bounds.east);
@@ -1352,7 +1331,7 @@ map = (function () {
         };
       }
       var heightmap = await buildHeightmap(job, step(1, 'heightmap'));
-      // An OpenStreetMap outage shouldn't sink the whole export, so the zip goes out without towns and its name says so.
+      // An OpenStreetMap outage shouldn't sink the whole export. The zip goes out without towns. Its name says so.
       var towns = null, townError = null;
       try {
         towns = await buildTowns(job, step(2, 'towns'), heightmap.heights, heightmap.terrain);
@@ -1375,46 +1354,35 @@ map = (function () {
     }, true);
   }
 
-  // show and hide help screen
   function toggleHelp(active) {
     var visibility = active ? "visible" : "hidden";
     document.getElementById('help').style.visibility = visibility;
-    // help-blocker prevents map interaction while help is visible
     document.getElementById('help-blocker').style.visibility = visibility;
   }
-  
-  // show and hide new alert
+
   function toggleNew(active) {
     var visibility = active ? "visible" : "hidden";
     document.getElementById('new').style.visibility = visibility;
-    // help-blocker prevents map interaction while help is visible
     document.getElementById('help-blocker').style.visibility = visibility;
   }
-  
+
   document.onkeydown = function (e) {
     e = e || window.event;
-    // listen for 'h'
+    // Key codes 72 and 27 are H and Escape.
     if (e.which == 72 && document.activeElement.tagName != 'INPUT') {
-      // toggle UI
       var display = map._controlContainer.style.display;
       map._controlContainer.style.display = (display === "none") ? "block" : "none";
       document.getElementsByClassName('dg')[0].style.display = (display === "none") ? "block" : "none";
-      // listen for 'esc'
     } else if (e.which == 27) {
       toggleHelp(false);
     }
   };
   
-  /***** Render loop *****/
   window.addEventListener('load', function () {
-    // Scene initialized
     layer.on('init', function() {
       gui = new dat.GUI({ autoPlace: true, hideable: true, width: 320 });
       addGUI();
-      // resetViewComplete();
       scene.subscribe({
-        // will be triggered when tiles are finished loading
-        // and also manually by the moveend event
         view_complete: function() {
         }
       });
@@ -1430,23 +1398,18 @@ map = (function () {
     });
     layer.addTo(map);
     
-    // bind help div onclicks
     document.getElementById('help').onclick = function(){toggleHelp(false)};
     document.getElementById('new').onclick = function(){toggleNew(false)};
     document.getElementById('help-blocker').onclick = function(){toggleHelp(false);toggleNew(false);};
     
-    // debounce moveend event
     var moveend = debounce(function(e) {
       moving = false;
-      // manually reset view_complete
       scene.resetViewComplete();
       scene.requestRedraw();
     }, 250);
     
     map.on("movestart", function (e) { moving = true; });
     map.on("moveend", function (e) { moveend(e) });
-    
-    // toggleNew(true);
   });
   
   return map;

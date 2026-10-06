@@ -11,7 +11,7 @@ var heightmapExport = (function () {
   const FETCH_ATTEMPTS = 4;
   // Real terrain stays inside these meters. Tiles sometimes hold garbage outside them, from a few pixels to a whole tile of noise.
   const PLAUSIBLE_MIN = -11500, PLAUSIBLE_MAX = 9000;
-  // A tile with a larger share of bad pixels is noise throughout, so all of it comes from the parent tile.
+  // A tile with a larger share of bad pixels is noise throughout. All of it comes from the parent tile.
   const BAD_TILE_SHARE = 0.01;
   const PREVIEW_SIZE = 1024;
   const FLAT_TOLERANCE = 0.02;
@@ -21,7 +21,7 @@ var heightmapExport = (function () {
   const WATER_MERGE_METERS = 0.5;
   const BATHYMETRY_URL = 'https://gis.ngdc.noaa.gov/arcgis/rest/services/DEM_mosaics/DEM_global_mosaic/ImageServer/exportImage';
   const LANDCOVER_URL = 'https://ic.imagery1.arcgis.com/arcgis/rest/services/Sentinel2_10m_LandCover/ImageServer/exportImage';
-  // Depth and land cover vary slowly next to the game's biome blending, so they're fetched at most this many pixels across.
+  // Depth and land cover vary slowly next to the game's biome blending. They're fetched at most this many pixels across.
   const RASTER_MAX_SIZE = 2049;
   // Bytes handed to the PNG compressor at a time, which sets how often its progress is reported.
   const PNG_CHUNK = 1 << 20;
@@ -29,7 +29,7 @@ var heightmapExport = (function () {
   const LC_NO_DATA = 0, LC_WATER = 1, LC_TREES = 2, LC_FLOODED = 4, LC_BARE = 8, LC_SNOW = 9, LC_CLOUDS = 10;
   // Water normalization. Smaller water bodies would pin the land around them to the water level.
   const NORMALIZE_MIN_KM2 = 0.5;
-  // In-game meters. Higher water bodies would need a crater around them, so they stay dry.
+  // In-game meters. Higher water bodies would need a crater around them. They stay dry.
   const NORMALIZE_MAX_LIFT = 100;
   // The steepest slope normalization adds to land in game, and the slope of the beds it lays below the shore.
   const NORMALIZE_GRADE = 0.1;
@@ -70,7 +70,7 @@ var heightmapExport = (function () {
   const RIVER_MAX_WIDTH = 280;
   // Real meters. Coast hills are land near the sea where this share of the land within HILL_AREA_RADIUS is steeper than HILL_SLOPE.
   const COAST_HILLS_DISTANCE = 15000, HILL_AREA_RADIUS = 500, HILL_AREA_SHARE = 0.3;
-  // Real meters. The game's volcano covers the whole cone, so each OpenStreetMap volcano spreads down the hill slopes around it.
+  // Real meters. The game's volcano covers the whole cone. Each OpenStreetMap volcano spreads down the hill slopes around it.
   const SUMMIT_SEARCH_RADIUS = 1000, VOLCANO_SEED_RADIUS = 600, VOLCANO_RADIUS = 10000;
   // Mesas and buttes are land ringed by cliffs steeper than CLIFF_SLOPE degrees, with a summit TABLELAND_MIN_RELIEF real meters above the highest point of its foot.
   const CLIFF_SLOPE = 45, TABLELAND_MIN_RELIEF = 30;
@@ -142,7 +142,6 @@ var heightmapExport = (function () {
     return h >= PLAUSIBLE_MIN && h <= PLAUSIBLE_MAX;
   }
 
-  // Fills bad pixels from the parent tile one zoom level coarser, which repairs itself the same way.
   async function repairTile(heights, z, x, y) {
     let bad = 0;
     for (let i = 0; i < heights.length; i++) if (!plausible(heights[i])) bad++;
@@ -198,7 +197,7 @@ var heightmapExport = (function () {
   }
 
   // Neighboring tiles were sometimes built from different surveys, leaving a straight step along their shared edge.
-  // The step is measured against the slope on both sides, median-smoothed along the edge so features crossing it don't count, then feathered out.
+  // The median along the edge keeps features that cross it from counting as a step.
   function healSeam(a, indexA, b, indexB, length) {
     const step = new Float32Array(length);
     for (let p = 0; p < length; p++) {
@@ -218,7 +217,6 @@ var heightmapExport = (function () {
     }
   }
 
-  // One row of tiles stitched into a strip TILE_SIZE rows tall.
   async function fetchStrip(z, ty, tx0, tx1) {
     const columns = tx1 - tx0 + 1;
     const stripWidth = columns * TILE_SIZE;
@@ -238,7 +236,6 @@ var heightmapExport = (function () {
   }
 
   // Source pixels and tent-filter weights for each output sample, as flat arrays indexed through offsets.
-  // The tent spans one output pixel each way and at least one source pixel, which makes it bilinear when upsampling.
   // wrap: the axis carries on past its edges, as longitude does around the world.
   function footprints(start, end, count, scale, wrap) {
     const radius = Math.max((end - start) * scale / (count - 1), 1);
@@ -265,7 +262,7 @@ var heightmapExport = (function () {
   }
 
   // Filters the source so every output pixel is smoothed alike. Point or box sampling near whole ratios leaves bands.
-  // Samples sit on a grid whose first and last pixels are on the region edges, streamed one tile row at a time.
+  // Samples sit on a grid whose first and last pixels are on the region edges.
   async function sampleRegion(region, width, height, zoom, onProgress) {
     const scale = TILE_SIZE * 2 ** zoom;
     const cols = footprints(region.x0, region.x1, width, scale, true);
@@ -289,7 +286,6 @@ var heightmapExport = (function () {
       return strips.get(ty);
     }
 
-    // Heals the edge between strip ty and the one below it, before any row near that edge is read.
     const healed = new Set();
     async function healBelow(ty) {
       if (healed.has(ty) || ty >= ty1) return;
@@ -361,7 +357,7 @@ var heightmapExport = (function () {
     return chunk;
   }
 
-  // Stored, uncompressed ZIP. The PNGs inside are already compressed, so deflating again would gain little.
+  // Stored, uncompressed ZIP. The PNGs inside are already compressed. Deflating them again would gain little.
   // onProgress(fraction): called as the files are read.
   async function makeZip(files, onProgress) {
     onProgress = onProgress || function () {};
@@ -478,7 +474,7 @@ var heightmapExport = (function () {
     return (region.x1 - region.x0) * EARTH_CIRCUMFERENCE * Math.cos(centerLat * Math.PI / 180);
   }
 
-  // Real m2 of one cell in each row of a grid over the region. Web Mercator stretches the ground away from the equator, so cells near the poles cover less.
+  // Real m2 of one cell in each row of a grid over the region. Web Mercator stretches the ground away from the equator. Cells near the poles cover less.
   function rowAreas(region, width, height) {
     const equator = (region.x1 - region.x0) * EARTH_CIRCUMFERENCE / (width - 1), areas = new Float64Array(height);
     for (let y = 0; y < height; y++) {
@@ -531,10 +527,10 @@ var heightmapExport = (function () {
       }
     }
 
-    // Land cover has no data over open ocean, so there it falls back to height. It keeps dry land below sea level from counting as water.
+    // Land cover keeps dry land below sea level from counting as water. It has no data over open ocean, where height decides.
     const isWater = i => cover && cover[i] !== LC_NO_DATA && cover[i] !== LC_CLOUDS ? cover[i] === LC_WATER : heights[i] <= 0;
 
-    // Open sea has real depth, so it never shows up as a flat surface. Other water at or below sea level counts as sea.
+    // Open sea has real depth. It never shows up as a flat surface. Other water at or below sea level counts as sea.
     let seaCells = 0, seaArea = 0;
     for (let i = 0; i < heights.length; i++) {
       if (heights[i] <= 0 && !claimed[i] && isWater(i)) {
@@ -593,8 +589,7 @@ var heightmapExport = (function () {
     };
   }
 
-  // ArcGIS image services return raw pixels on exactly our grid when asked for band-sequential Web Mercator output.
-  // ArcGIS image services return no data past the antimeridian, so a box crossing it is fetched in pieces, each shifted back into the world.
+  // ArcGIS image services return no data past the antimeridian. A box crossing it is fetched in pieces, each shifted back into the world.
   // onProgress(fraction): called as the image downloads. The server's own preparation time can't be measured.
   async function fetchImageServer(url, region, width, height, pixelType, interpolation, onProgress) {
     const out = new (pixelType === 'F32' ? Float32Array : Uint8Array)(width * height);
@@ -614,6 +609,7 @@ var heightmapExport = (function () {
   }
 
   // Columns from normalized x0, cell apart, all inside one copy of the world.
+  // ArcGIS image services return raw pixels on exactly our grid when asked for band-sequential Web Mercator output.
   async function fetchImagePiece(url, x0, width, cell, region, height, pixelType, interpolation, onProgress) {
     const span = 2 * Math.PI * 6378137;
     const dx = cell * span, dy = (region.y1 - region.y0) * span / (height - 1);
@@ -646,8 +642,7 @@ var heightmapExport = (function () {
     return {width: Math.max(2, Math.round((width - 1) * scale) + 1), height: Math.max(2, Math.round((height - 1) * scale) + 1)};
   }
 
-  // Everything at or below level (meters) is under water in game, so it takes NOAA's depth, never rising above the level.
-  // NOAA has no data within a few kilometers of the antimeridian, so those pixels take the nearest depth in their row.
+  // NOAA has no data within a few kilometers of the antimeridian.
   function fillGaps(grid, width, height, reach) {
     for (let r = 0; r < height; r++) {
       const row = r * width;
@@ -667,9 +662,8 @@ var heightmapExport = (function () {
     }
   }
 
-  // Cells at or below submerge.level take NOAA depths, and every one ends at or below submerge.top so it sits under the water.
-  // onProgress(fraction): as for fetchImageServer.
-  // lowered: optional, cells water normalization lowered. Their NOAA values describe the old height, so they are left for layBeds.
+  // Cells at or below submerge.level take NOAA depths. Every one ends at or below submerge.top so it sits under the water.
+  // lowered: optional, cells water normalization lowered. Their NOAA values describe the old height. They are left for layBeds.
   // Returns a note, and on NOAA's grid the water bodies it surveyed, as {grid, width, height}, or null.
   async function applyBathymetry(heights, width, height, region, submerge, onProgress, lowered) {
     const {level, top} = submerge;
@@ -701,7 +695,6 @@ var heightmapExport = (function () {
     return {note: note, surveyed: depth ? surveyedWater(heights, width, height, depth, bw, bh, level, top) : null};
   }
 
-  // Marks the cells of NOAA's grid in water bodies it gives real depths for across at least SURVEYED_SHARE of their area.
   // NOAA repeats the surface of water it has no survey of, like most lakes, which would otherwise read as very shallow water.
   function surveyedWater(heights, width, height, depth, bw, bh, level, top) {
     const water = new Uint8Array(bw * bh);
@@ -722,15 +715,14 @@ var heightmapExport = (function () {
   }
 
   // Half-width r and edge share of three box passes that together blur with a standard deviation of sigma pixels.
-  // The share weights the cell just past each end of the box, so the blur grows smoothly instead of a whole pixel at a time.
+  // The share lets the blur grow smoothly instead of a whole pixel at a time.
   function boxKernel(sigma) {
     const r = Math.floor((Math.sqrt(4 * sigma * sigma + 1) - 1) / 2);
     const v = sigma * sigma / 3, a = r * (r + 1) * (2 * r + 1) / 3, b = 2 * r + 1;
     return {r: r, share: (v * b - a) / (2 * (r + 1) * (r + 1) - 2 * v)};
   }
 
-  // A Gaussian-like blur of the land, sigma in pixels, from three box passes over normalized sums.
-  // Water at or below level is left out entirely, so no shoreline moves.
+  // A Gaussian-like blur of the land, sigma in pixels. Water at or below level is left out so that no shoreline moves.
   // onProgress(fraction): called after each pass, and awaited.
   async function smoothLand(heights, width, height, sigma, level, onProgress) {
     if (!(sigma > 0)) return;
@@ -843,8 +835,8 @@ var heightmapExport = (function () {
     return out;
   }
 
-  // Biome map plus the climate's layer masks for Transport Fever 3's biome import, from land cover and terrain steepness.
-  // waterLevel: meters, anything at or below it is water. waterFromRiver: as for render. volcanoes: OpenStreetMap volcano nodes, {lat, lon}.
+  // Biome map plus the climate's layer masks for Transport Fever 3's biome import.
+  // waterLevel: real meters at or below which the map is water. waterFromRiver: as for render. volcanoes: OpenStreetMap volcano nodes, {lat, lon}.
   // width and height are the region's, north up. northLeft turns every image a quarter left.
   async function renderBiomes(options) {
     const {bounds, width, height, climate, waterLevel, waterFromRiver, volcanoes, northLeft} = options;
@@ -861,7 +853,7 @@ var heightmapExport = (function () {
     const realSpacing = groundWidth(region) / (gw - 1);
     const biome = new Uint8Array(gw * gh), mountains = new Uint8Array(gw * gh), water = new Uint8Array(gw * gh);
     const slope = new Float32Array(gw * gh);
-    // The heightmap raises polder land, so it stays land here too.
+    // The heightmap raises polder land. It stays land here too.
     const dryness = signedDistance(cover.map(lc => dryLand(lc) ? 1 : 0), gw, gh);
     const polders = polderLand(heights, gw, gh, waterLevel, i => dryness[i], POLDER_MIN_KM2 * 1e6 / realSpacing ** 2, waterFromRiver ? 0 : Math.max(1, POLDER_INLAND / realSpacing));
     for (let y = 0; y < gh; y++) {
@@ -938,7 +930,7 @@ var heightmapExport = (function () {
     };
   }
 
-  // Mean over the square of half-width r cells around each cell, from a summed-area table.
+  // Mean over the square of half-width r cells around each cell.
   function boxMean(grid, width, height, r) {
     const w1 = width + 1, table = new Float64Array(w1 * (height + 1));
     for (let y = 0; y < height; y++) {
@@ -960,8 +952,7 @@ var heightmapExport = (function () {
     return mean;
   }
 
-  // Land around each volcano's summit, grown downhill over slopes steeper than HILL_SLOPE up to VOLCANO_RADIUS.
-  // Only going downhill keeps the cone from spreading onto neighboring mountains.
+  // Growth only goes downhill so that the cone doesn't spread onto neighboring mountains.
   function growVolcanoes(volcanoes, region, heights, slope, water, width, height, spacing) {
     const mask = new Uint8Array(width * height);
     const owner = new Int32Array(width * height);
@@ -977,7 +968,7 @@ var heightmapExport = (function () {
     const centerLng = xToLng((region.x0 + region.x1) / 2);
     volcanoes.forEach((v, n) => {
       const id = n + 1;
-      // OpenStreetMap longitudes stay within -180 to 180, so they move to the copy of the world the box is in.
+      // OpenStreetMap longitudes stay within -180 to 180. They move to the copy of the world the box is in.
       const lon = v.lon + 360 * Math.round((centerLng - v.lon) / 360);
       // Growth starts at the highest land near the point, since OpenStreetMap points often sit on a flank or the crater floor.
       let top = -1;
@@ -1011,7 +1002,6 @@ var heightmapExport = (function () {
     return mask;
   }
 
-  // Mesas and monument valley buttes: cliff-ringed land standing above its surroundings.
   function findTablelands(heights, slope, water, width, height, spacing) {
     const n = heights.length;
     const gap = Math.round(CLIFF_GAP / spacing);
@@ -1090,7 +1080,6 @@ var heightmapExport = (function () {
     return {labels: labels, count: count};
   }
 
-  // A quarter turn counterclockwise, which puts north on the left.
   function rotateLeft(samples, width, height) {
     const out = new samples.constructor(samples.length);
     for (let r = 0; r < height; r++) {
@@ -1103,7 +1092,6 @@ var heightmapExport = (function () {
     return northLeft ? encodeGrayPng(rotateLeft(samples, width, height), height, width, bitDepth, text, onProgress) : encodeGrayPng(samples, width, height, bitDepth, text, onProgress);
   }
 
-  // Land masses that don't reach the edge of the map are islands.
   function landNotTouchingEdge(water, width, height) {
     const {labels, count} = label(water.map(w => 1 - w), width, height);
     const edge = new Uint8Array(count + 1);
@@ -1113,7 +1101,7 @@ var heightmapExport = (function () {
   }
 
   // Heights in meters for the output pixels within radius of (px, py), north up, a square 2 radius + 1 wide.
-  // terrain: the heights render returned for this output, read instead of fetching. smoothing and level: as for render.
+  // terrain: the heights render returned for this output, read instead of fetching. smoothing: as for render. level: as render's waterLevel.
   // plan: a water normalization plan for fetched patches, which render has already applied to terrain.
   async function terrainPatch(bounds, width, height, px, py, radius, options) {
     const {terrain, smoothing, level, plan, polders} = options;
@@ -1126,13 +1114,13 @@ var heightmapExport = (function () {
       }
       return heights;
     }
-    // The blur reaches this far, so a margin this wide makes the smoothed patch match the smoothed map.
+    // The blur reaches this far. A margin this wide makes the smoothed patch match the smoothed map.
     const pad = smoothing > 0 ? 3 * (boxKernel(smoothing).r + 1) : 0;
     const full = size + 2 * pad, reach = radius + pad;
     const region = boundsToRegion(bounds);
     const dx = (region.x1 - region.x0) / (width - 1), dy = (region.y1 - region.y0) / (height - 1);
     const patch = {x0: region.x0 + (px - reach) * dx, x1: region.x0 + (px + reach) * dx, y0: region.y0 + (py - reach) * dy, y1: region.y0 + (py + reach) * dy};
-    // Sampled exactly as render samples the map, so this is the terrain in the heightmap.
+    // Sampled exactly as render samples the map so that the patch matches the heightmap.
     const heights = await sampleRegion(patch, full, full, pickZoom(region.x1 - region.x0, width, 2), function () {});
     if (polders) raisePolders(polders, heights, full, full, px - reach, py - reach, width, height);
     if (plan) await applyWaterPlan(plan, heights, full, full, px - reach, py - reach, width, height);
@@ -1151,12 +1139,12 @@ var heightmapExport = (function () {
     const n = gw * gh;
     const water = new Uint8Array(n);
     for (let i = 0; i < n; i++) if (cover[i] === LC_WATER || (rivers && rivers[i])) water[i] = 1;
-    // Trees and bridges break rivers into pieces, so pieces two cells apart count as one water body.
+    // Trees and bridges break rivers into pieces. Pieces two cells apart count as one water body.
     const {labels, count} = label(distanceTo(water, gw, gh).map(d => d <= 2 ? 1 : 0), gw, gh);
     const bodyArea = new Float64Array(count + 1);
     for (let i = 0; i < n; i++) if (water[i]) bodyArea[labels[i]] += areas[(i / gw) | 0];
-    // The lowest water neighbor keeps bank cells out of the surface, then a blur along the water evens out survey steps.
-    // A river course only marks where the river runs, so its surface is the lowest ground right around it.
+    // The lowest water neighbor keeps bank cells out of the surface. A blur along the water evens out survey steps.
+    // A river course only marks where the river runs. Its surface is the lowest ground right around it.
     const sum = new Float32Array(n), weight = new Float32Array(n);
     for (let y = 0; y < gh; y++) {
       for (let x = 0; x < gw; x++) {
@@ -1189,7 +1177,7 @@ var heightmapExport = (function () {
 
     const guard = 1 / scale, maxLift = NORMALIZE_MAX_LIFT / scale;
     const lift = new Float32Array(n), lowered = new Uint8Array(n), atLevel = new Uint8Array(n);
-    // The limit goes cell by cell, so a river climbing into hills still fills its lower reaches. A lake is flat, so it fills or stays dry whole.
+    // The limit goes cell by cell. A river climbing into hills still fills its lower reaches. A lake, being flat, fills or stays dry whole.
     const bodies = new Uint8Array(count + 1);
     let deepest = 0, dryArea = 0;
     for (let i = 0; i < n; i++) {
@@ -1205,7 +1193,7 @@ var heightmapExport = (function () {
       bodies[labels[i]] |= lowered[i] ? 2 : 1;
       deepest = Math.max(deepest, lift[i] * scale);
     }
-    // River lines are drawn at full resolution with their own width, so they stay out of the coarse shoreline rules below.
+    // River lines are drawn at full resolution with their own width. They stay out of the coarse shoreline rules below.
     const lineClass = new Uint8Array(n);
     if (rivers) {
       for (let i = 0; i < n; i++) {
@@ -1217,7 +1205,7 @@ var heightmapExport = (function () {
     const outline = signedDistance(lowered, gw, gh), wet = signedDistance(kept, gw, gh);
     const stats = {lowered: bodies.filter(b => b & 2).length, dryKm2: dryArea / 1e6, deepest: deepest};
     // Water at the level that surveys a little above it, like a tidal channel, has its own flat surface, which draws its shoreline.
-    // The middle of its neighbors skips bank samples. Water at or below the level stays out of it.
+    // The median of its neighbors skips bank samples.
     const channelSum = new Float32Array(n), channelWeight = new Float32Array(n), near = [];
     for (let y = 0; y < gh; y++) {
       for (let x = 0; x < gw; x++) {
@@ -1253,7 +1241,7 @@ var heightmapExport = (function () {
       const t = Math.max(0, 1 - distance[i] * gameCell * NORMALIZE_GRADE / (lift[i] * scale));
       offset[i] = lift[i] * t * t * (3 - 2 * t);
     }
-    // Seams sit away from the water, so the blur fades out toward the water, which keeps its full lowering.
+    // Seams sit away from the water. The blur fades out toward the water, which keeps its full lowering.
     const exact = offset.slice();
     await smoothLand(offset, gw, gh, NORMALIZE_SEAM / gameCell, -Infinity);
     for (let i = 0; i < n; i++) {
@@ -1263,9 +1251,8 @@ var heightmapExport = (function () {
     return {offset: offset, lift: lift, outline: outline, wet: wet, channel: channel, lineClass: lineClass, level: level, guard: guard, scale: scale, gw: gw, gh: gh, stats: stats};
   }
 
-  // Fetches land cover and plans water normalization for an output. heights: real meters for the whole output, or null to fetch coarser ones.
-  // onStage(stage, fraction): reports the downloads. rivers: optional, river courses as [[lat, lon], ...] lines.
-  // riverSlack: optional, real meters the courses may stray from their river. cover: optional, land cover as landCoverFor gives it.
+  // heights: real meters for the whole output, or null to fetch coarser ones. cover: optional, land cover as landCoverFor gives it.
+  // rivers: optional, river courses as [[lat, lon], ...] lines. riverSlack: optional, real meters they may stray from their river.
   async function planWaterFor(region, width, height, heights, scale, level, onStage, rivers, riverSlack, cover) {
     const {width: gw, height: gh} = rasterSize(width, height);
     let coarse;
@@ -1289,9 +1276,8 @@ var heightmapExport = (function () {
     return plan;
   }
 
-  // Moves lines in output pixels onto the nearest land cover water within reach grid cells, after splitting them into steps of one cell.
+  // Moves lines, in output pixels, onto the nearest land cover water within reach grid cells. sx, sy: grid cells per output pixel.
   // A line that strays from its river then runs in the river where land cover sees it, and bridges its gaps instead of cutting a second channel beside it.
-  // sx, sy: grid cells per output pixel.
   function snapLines(lines, cover, gw, gh, sx, sy, reach) {
     const water = new Uint8Array(gw * gh), nearest = new Int32Array(gw * gh);
     for (let i = 0; i < water.length; i++) {
@@ -1315,7 +1301,7 @@ var heightmapExport = (function () {
     });
   }
 
-  // Land cover classes on the water plan's grid for an output. onStage(stage, fraction): reports the download.
+  // Land cover classes on the water plan's grid for an output.
   function landCoverFor(region, width, height, onStage) {
     const {width: gw, height: gh} = rasterSize(width, height);
     onStage('Fetching land cover...');
@@ -1323,16 +1309,13 @@ var heightmapExport = (function () {
     return fetchImageServer(LANDCOVER_URL, region, gw, gh, 'U8', 'RSP_Majority', f => onStage('Fetching land cover...', f));
   }
 
-  // Land cover classes of dry land. Marsh counts as water, and open sea has no land cover data at all.
+  // Marsh counts as water. Open sea has no land cover data at all.
   function dryLand(lc) {
     return lc !== LC_NO_DATA && lc !== LC_WATER && lc !== LC_FLOODED && lc !== LC_CLOUDS;
   }
 
-  // Pixels of dry land at or below the waterline that the game's single water level would wrongly drown, marked with a nonzero value.
-  // That is land no water reaches through ground at or below the waterline, in patches of at least minPixels, like polders behind dikes,
-  // land more than POLDER_DEPTH below the waterline a whole land cover cell from water, like polders whose dikes the elevation data smooths away,
-  // and land inland cells or more from water. Low land open to the water, like tidal marsh, stays as it is.
-  // dryness(k): signed distance in land cover cells from pixel k to water, 0 or more on dry land.
+  // Dry land at or below the waterline that the game's single water level would wrongly drown, marked nonzero.
+  // dryness(k): signed distance in land cover cells from pixel k to water, 0 or more on dry land. inland: in the same cells.
   function polderLand(heights, width, height, waterline, dryness, minPixels, inland) {
     const DRY = 1, REACHED = 2, DEEP = 4, RAISE = 8, state = new Uint8Array(width * height);
     let low = 0, tail = 0;
@@ -1371,8 +1354,8 @@ var heightmapExport = (function () {
   }
 
   // The game has one water level, which would drown dry land enclosed below it, like polders. Such land goes one in-game meter above the water instead.
-  // cover: land cover as landCoverFor gives it. waterline: real meters at or below which the map is water.
-  // pixelMeters and cellMeters: real meters per output pixel and per land cover cell.
+  // cover: as landCoverFor gives it. waterline: real meters at or below which the map is water.
+  // pixelMeters, cellMeters: real meters per output pixel and per land cover cell.
   // everywhere: raise all dry land below the waterline, for a level taken from a river's lowest point, where any lake below it would be made up.
   function polderPlan(cover, gw, gh, waterline, scale, pixelMeters, cellMeters, everywhere) {
     const dry = new Uint8Array(gw * gh);
@@ -1381,7 +1364,7 @@ var heightmapExport = (function () {
       minPixels: POLDER_MIN_KM2 * 1e6 / pixelMeters ** 2, inland: everywhere ? 0 : Math.max(1, POLDER_INLAND / cellMeters)};
   }
 
-  // Raises polder land by a polder plan. Returns how many pixels it raised in each row.
+  // Returns how many pixels it raised in each row.
   // The grid covers output pixels x0 to x0 + width - 1 and y0 to y0 + height - 1 of an output outputWidth x outputHeight.
   function raisePolders(polders, heights, width, height, x0, y0, outputWidth, outputHeight) {
     const {edge, gw, gh, waterline, top, minPixels, inland} = polders;
@@ -1406,7 +1389,7 @@ var heightmapExport = (function () {
     return rivers.map(line => {
       const out = new Float64Array(line.length * 2);
       line.forEach(([lat, lng], p) => {
-        // OpenStreetMap longitudes stay within -180 to 180, so they move to the copy of the world the region is in.
+        // OpenStreetMap longitudes stay within -180 to 180. They move to the copy of the world the region is in.
         out[2 * p] = (lngToX(lng + 360 * Math.round((centerLng - lng) / 360)) - region.x0) / (region.x1 - region.x0) * (width - 1);
         out[2 * p + 1] = (latToY(lat) - region.y0) / (region.y1 - region.y0) * (height - 1);
       });
@@ -1437,7 +1420,7 @@ var heightmapExport = (function () {
     return cells;
   }
 
-  // Lowers a grid by a plan and sets the water it lowered to the plan's level. Returns which cells that water covers.
+  // Returns which cells hold water it lowered to the plan's level.
   // The grid covers output pixels x0 to x0 + width - 1 and y0 to y0 + height - 1 of an output outputWidth x outputHeight.
   // onProgress(fraction): optional, called every ROW_BATCH rows, and awaited.
   async function applyWaterPlan(plan, heights, width, height, x0, y0, outputWidth, outputHeight, onProgress) {
@@ -1537,10 +1520,8 @@ var heightmapExport = (function () {
   }
 
   // Lays an estimated bed under water the data gives no depth for, since elevation data only records a water surface.
-  // That is water normalization lowered, and water applyBathymetry left at its flat top outside the bodies NOAA surveyed.
-  // The bed deepens from the shore. submerge: as for applyBathymetry. surveyed: as applyBathymetry returns it, or null.
-  // gameCell: in-game meters per cell. Returns how many cells got a bed in each row.
-  // onProgress(fraction): optional, called every ROW_BATCH rows of each pass, and awaited.
+  // submerge: as for applyBathymetry. surveyed: as applyBathymetry returns it, or null. gameCell: in-game meters per cell.
+  // Returns how many cells got a bed in each row. onProgress(fraction): optional, called every ROW_BATCH rows of each pass, and awaited.
   async function layBeds(heights, width, height, submerge, lowered, surveyed, gameCell, scale, onProgress) {
     const {level, top} = submerge, flat = Math.fround(top);
     const sx = surveyed ? (surveyed.width - 1) / (width - 1) : 0, sy = surveyed ? (surveyed.height - 1) / (height - 1) : 0;
@@ -1613,7 +1594,7 @@ var heightmapExport = (function () {
     const {surfaces: water, floodShare} = findWaterSurfaces(heights, width, height, areas, floor, ceiling, cover);
     const areaKm2 = areas.reduce((sum, a) => sum + a, 0) * width / 1e6;
     const sea = submerge ? submerge(water, floodShare, areaKm2) : null;
-    // The level comes from the map as it is, so lowering water onto it can't change which level that is.
+    // The level comes from the map as it is. Lowering water onto it can't change which level that is.
     const surface = normalizeWater && cover ? normalizeWater(water, floodShare, areaKm2) : null;
     let plan = null, lifted = null;
     if (surface !== null && isFinite(surface)) {
@@ -1637,8 +1618,8 @@ var heightmapExport = (function () {
 
   // limits(peak): as for analyze. range(lo, hi): given the clamped data's extremes in meters, returns the {min, max} that map to black and white.
   // submerge: the {level, top} in meters for applyBathymetry, or null. smoothing: the blur's sigma in pixels, or 0.
-  // waterLevel: meters, anything at or below it is water. It stays out of the smoothing, and dry land below it is raised above it.
-  // waterFromRiver: the level is a river's lowest point, so all dry land below it is raised.
+  // waterLevel: real meters at or below which the map is water. That water stays out of the smoothing. Dry land below the level is raised above it.
+  // waterFromRiver: the level is a river's lowest point. All dry land below it is raised.
   // normalizeWater: lower rivers and lakes onto the water surface limits gives, in real meters as waterSurface.
   // rivers: optional, river courses as [[lat, lon], ...] lines for normalization. riverSlack: optional, real meters they may stray from their river.
   // width and height are the region's, north up. northLeft turns the image a quarter left.
@@ -1744,7 +1725,7 @@ var heightmapExport = (function () {
     groundWidth: function (bounds) {
       return groundWidth(boundsToRegion(bounds));
     },
-    // Ground meters from the north edge to the south edge, along a meridian. Web Mercator stretches it, so it can't come from the meters per pixel.
+    // Ground meters from the north edge to the south edge, along a meridian. Web Mercator stretches it. The meters per pixel can't give it.
     groundHeight: function (bounds) {
       return (bounds.north - bounds.south) / 360 * EARTH_CIRCUMFERENCE;
     },

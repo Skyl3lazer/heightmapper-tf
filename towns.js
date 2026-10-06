@@ -9,10 +9,10 @@ var townExport = (function () {
   const EDGE_MARGIN = 800;
   const SIZE_RANGE = [0.55, 2.6];
   const DEFAULT_POPULATION = {city: 50000, town: 10000, village: 1000};
-  // Largest place types first. Overpass can't rank by population, so smaller types are fetched only while the larger ones leave the map short of towns.
+  // Overpass can't rank by population. Smaller types are fetched only while the larger ones leave the map short of towns.
   // The last value is the most real km2 one lookup of a type covers, past which it runs into Overpass's time limit.
   const PLACE_TIERS = [['city', 'cities', Infinity], ['town', 'towns', 1e6], ['village', 'villages', 2.5e5]];
-  // Spots per side of a tile tested for room left for another town.
+  // Steps per side of the grid of spots in a tile tested for room left for another town.
   const TOWN_TILE_SAMPLES = 8;
   // Most tiles one type is looked up in, which keeps a world map's lookup to minutes.
   const MAX_TOWN_TILES = 24;
@@ -20,13 +20,13 @@ var townExport = (function () {
   const INDUSTRIAL_NEEDS = ['bricks', 'planks', 'fuel'];
   // The game starts every town with one straight street centered on its position. A town whose street can't be built never grows.
   const STREET_HALF_LENGTH = 44;
-  // The game's limits are 0.40 and 8 m. Its heights differ from bilinear sampling by up to 0.75 m, so these keep a margin.
+  // The game's limits are 0.40 and 8 m. Its heights differ from bilinear sampling by up to 0.75 m. These keep a margin for that.
   const MAX_STREET_GRADE = 0.38;
   const MIN_WATER_GAP = 9;
   // In-game water covers this far around each height sample at or below the water level.
   const WATER_CELL_HALF = 4;
 
-  // The game seeds one minstd_rand step with the position, so every meter a town moves turns its street.
+  // The game seeds one minstd_rand step with the position. Every meter a town moves turns its street.
   function streetAngle(x, y) {
     let seed = ((Math.trunc(x) + Math.trunc(y)) >>> 0) % 2147483647;
     if (seed === 0) seed = 1;
@@ -48,8 +48,7 @@ var townExport = (function () {
         }
       }
     }
-    // Everything closer to water than a street may come, on a 1 m grid.
-    // Street points round to the nearest cell, so the band reaches half a cell diagonal further to stay on the safe side.
+    // Street points round to the nearest 1 m cell. Half a cell diagonal on the gap keeps them on the safe side.
     const gap = MIN_WATER_GAP + Math.SQRT1_2, edge = Math.ceil(gap);
     const blocked = water.slice(), disk = [];
     for (let y = -edge; y <= edge; y++) {
@@ -94,7 +93,7 @@ var townExport = (function () {
           queue.push(k);
         }
         queue.forEach(k => { reached[k] = 1; });
-        // Four neighbors, so land touching only at a corner doesn't count as connected across the water between.
+        // Four neighbors, so that land touching only at a corner doesn't count as connected across the water between.
         for (let n = 0; n < queue.length; n++) {
           const k = queue[n], x = k % span;
           for (const q of [x > 0 ? k - 1 : -1, x < span - 1 ? k + 1 : -1, k - span, k + span]) {
@@ -117,12 +116,11 @@ var townExport = (function () {
   // Cyrillic and Greek spell out letter by letter, for places with no Latin name at all.
   const TRANSLIT = {'\u0430': 'a', '\u0431': 'b', '\u0432': 'v', '\u0433': 'g', '\u0434': 'd', '\u0435': 'e', '\u0451': 'yo', '\u0436': 'zh', '\u0437': 'z', '\u0438': 'i', '\u0439': 'y', '\u043a': 'k', '\u043b': 'l', '\u043c': 'm', '\u043d': 'n', '\u043e': 'o', '\u043f': 'p', '\u0440': 'r', '\u0441': 's', '\u0442': 't', '\u0443': 'u', '\u0444': 'f', '\u0445': 'kh', '\u0446': 'ts', '\u0447': 'ch', '\u0448': 'sh', '\u0449': 'shch', '\u044a': '', '\u044b': 'y', '\u044c': '', '\u044d': 'e', '\u044e': 'yu', '\u044f': 'ya', '\u0456': 'i', '\u0457': 'yi', '\u0454': 'ye', '\u0491': 'g', '\u045e': 'u', '\u0458': 'j', '\u0459': 'lj', '\u045a': 'nj', '\u045b': 'c', '\u0452': 'dj', '\u045f': 'dz', '\u0453': 'g', '\u045c': 'k', '\u0455': 'dz', '\u03b1': 'a', '\u03b2': 'v', '\u03b3': 'g', '\u03b4': 'd', '\u03b5': 'e', '\u03b6': 'z', '\u03b7': 'i', '\u03b8': 'th', '\u03b9': 'i', '\u03ba': 'k', '\u03bb': 'l', '\u03bc': 'm', '\u03bd': 'n', '\u03be': 'x', '\u03bf': 'o', '\u03c0': 'p', '\u03c1': 'r', '\u03c3': 's', '\u03c2': 's', '\u03c4': 't', '\u03c5': 'y', '\u03c6': 'f', '\u03c7': 'ch', '\u03c8': 'ps', '\u03c9': 'o', '\u03ac': 'a', '\u03ad': 'e', '\u03ae': 'i', '\u03af': 'i', '\u03cc': 'o', '\u03cd': 'y', '\u03ce': 'o', '\u03ca': 'i', '\u03cb': 'y', '\u0390': 'i', '\u03b0': 'y'};
 
-  // Names in Latin script, accents included. Combining marks and anything that isn't a letter are fine.
+  // Accented letters count as Latin. Combining marks and anything that isn't a letter are fine.
   function isLatin(text) {
     return /^[\p{Script=Latin}\P{L}]*$/u.test(text) && /\p{L}/u.test(text);
   }
 
-  // The local name when it's already Latin, then English and international names, then romanizations, then transliteration.
   function latinName(tags) {
     const keys = ['name', 'name:en', 'int_name'].concat(Object.keys(tags).filter(k => /^name:[a-z]+[-_](Latn|rm)/i.test(k)));
     const key = keys.find(k => tags[k] && isLatin(tags[k]));
@@ -222,15 +220,14 @@ var townExport = (function () {
     }
 
     const centerLng = (bounds.west + bounds.east) / 2;
-    // Game position of a point, east and north of the map center before a landscape export turns it, or null within EDGE_MARGIN of the edge.
+    // Game position of a point, east and north of the map center before a landscape export turns it.
     function position(lat, lon) {
       const p = heightmapExport.project(lat, lon);
       const x = snap(((p.x - nw.x) / (se.x - nw.x) - 0.5) * 2 * halfX);
       const y = snap((0.5 - (p.y - nw.y) / (se.y - nw.y)) * 2 * halfY);
       return Math.abs(x) > halfX - EDGE_MARGIN || Math.abs(y) > halfY - EDGE_MARGIN ? null : {x: x, y: y};
     }
-    // Places of one type, looked up in tiles of at most maxKm2 so no lookup runs into Overpass's time limit.
-    // Tiles with no room left for another town are left out. report(fraction): called as tiles finish.
+    // Places of one type, looked up in tiles of at most maxKm2 so no lookup runs into Overpass's time limit. report(fraction): called as tiles finish.
     async function lookUp(tag, maxKm2, report) {
       const areaKm2 = heightmapExport.groundWidth(bounds) * heightmapExport.groundHeight(bounds) / 1e6;
       const count = Math.max(1, Math.ceil(areaKm2 / maxKm2)), aspect = heightmapExport.groundWidth(bounds) / heightmapExport.groundHeight(bounds);
@@ -270,7 +267,7 @@ var townExport = (function () {
       try {
         found = await lookUp(tag, maxKm2, f => onStage('Looking up ' + plural + '...', f));
       } catch (e) {
-        // Smaller places only fill out a map, so the towns already placed are kept.
+        // Smaller places only fill out a map. The towns already placed are kept.
         if (!candidates.length) throw e;
         notes.push(plural + ' left out because ' + e.message);
         break;
@@ -279,7 +276,7 @@ var townExport = (function () {
       for (const place of found.places) {
         const name = originalNames ? String(place.tags.name || '').trim() : latinName(place.tags);
         if (!name) continue;
-        // OpenStreetMap longitudes stay within -180 to 180, so they move to the copy of the world the box is in.
+        // OpenStreetMap longitudes stay within -180 to 180. They move to the copy of the world the box is in.
         const lon = place.lon + 360 * Math.round((centerLng - place.lon) / 360);
         const at = position(place.lat, lon);
         if (!at) continue;
@@ -290,7 +287,6 @@ var townExport = (function () {
       // Nudges run in batches between passes so the progress bar knows how many are due.
       // A nudge can free a place or crowd a neighbor, which the next pass settles.
       for (;;) {
-        // Progress counts towns placed against the most this tier can place.
         const target = Math.max(1, Math.min(maxTowns, candidates.length));
         onStage('Checking town streets...', 0);
         towns = [];
@@ -298,7 +294,7 @@ var townExport = (function () {
         const waiting = [];
         for (const c of candidates) {
           if (towns.length >= maxTowns) break;
-          // Only towns that could still be picked get checked, and each only once across the tiers.
+          // Only towns that could still be picked get checked. Each is checked only once across the tiers.
           if (!towns.every(t => Math.hypot(t.x - c.x, t.y - c.y) + reach >= minSpacing)) continue;
           if (c.town === undefined && !c.tester) {
             onStage('Checking town streets...', towns.length / target);

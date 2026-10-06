@@ -1,6 +1,5 @@
 /*jslint browser: true*/
 
-// OpenStreetMap lookups through the Overpass API.
 var overpass = (function () {
   'use strict';
 
@@ -11,11 +10,11 @@ var overpass = (function () {
     'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
     'https://overpass-api.de/api/interpreter'
   ].filter(Boolean);
-  // Past the [timeout:90] every query carries, so a server's own timeout reply arrives before this gives up on it.
+  // Past the [timeout:90] every query carries, so that a server's own timeout reply arrives before this gives up on it.
   const TIMEOUT_MS = 100000;
-  // Bigger boxes are looked up in tiles this size, one after another, so no single river query hits the server's limits.
+  // Bigger boxes are looked up in tiles this size, one after another, so that no single river query hits the server's limits.
   const RIVER_TILE_DEGREES = 3;
-  // Past this many tiles a lookup runs for minutes, up to thousands of queries for the whole world, so rivers() declines such maps.
+  // Past this many tiles a lookup runs for minutes, up to thousands of queries for the whole world.
   const RIVER_MAX_TILES = 24;
 
   function configuredUrl() {
@@ -23,7 +22,7 @@ var overpass = (function () {
     return (config.overpassUrl || '').replace('{key}', encodeURIComponent(config.overpassKey || ''));
   }
 
-  // Overpass only takes longitudes from -180 to 180, so a box crossing the antimeridian splits into one box each side.
+  // Overpass only takes longitudes from -180 to 180. A box crossing the antimeridian splits into one box each side.
   function bboxes(bounds) {
     const {south, north} = bounds;
     const shift = 360 * Math.round((bounds.west + bounds.east) / 2 / 360);
@@ -35,17 +34,15 @@ var overpass = (function () {
   }
 
   // The nodes inside bounds matching an Overpass tag filter such as ["natural"="volcano"].
-  // A box around the whole world is left out, since Overpass searches everywhere about twice as fast, and callers drop nodes outside their box.
+  // A box around the whole world is left out, since Overpass searches everywhere about twice as fast. Callers drop nodes outside their box.
   function nodes(bounds, filter) {
     // A box capped at one copy of the world comes out a hair under 360 degrees wide.
     const parts = bounds.east - bounds.west >= 360 - 1e-3 ? `node${filter};` : bboxes(bounds).map(b => `node${filter}(${b.join(',')});`).join('');
     return run(`[out:json][timeout:90];(${parts});out qt;`);
   }
 
-  // River courses inside bounds at least minLength real meters long, and shorter ones linking them, as [[lat, lon], ...] lines clipped to the box.
-  // OpenStreetMap often splits a river into many short pieces, so pieces are first listed with only their name and length, which is small.
-  // A named river is judged by the length of all its pieces together, and only the pieces of rivers that pass are fetched with their points.
-  // Returns null for a box needing more than RIVER_MAX_TILES tiles.
+  // River courses inside bounds at least minLength real meters long, and shorter ones linking them, as [[lat, lon], ...] lines clipped to the box, or null past RIVER_MAX_TILES tiles.
+  // OpenStreetMap often splits a river into many short pieces. A named river is judged by the length of all its pieces together.
   async function rivers(bounds, minLength) {
     const rows = Math.ceil((bounds.north - bounds.south) / RIVER_TILE_DEGREES), cols = Math.ceil((bounds.east - bounds.west) / RIVER_TILE_DEGREES);
     const tiles = [];
@@ -107,7 +104,7 @@ var overpass = (function () {
     for (const name of names) {
       const ids = short.filter(id => pieces.get(id).name === name && nodes.has(id)), at = new Map();
       for (const id of ids) endsOf(id).forEach(n => at.set(n, (at.get(n) || []).concat(id)));
-      // Separate rivers can share a name, so each run of pieces joined end to end is judged alone.
+      // Separate rivers can share a name. Each run of pieces joined end to end is judged alone.
       const seen = new Set();
       for (const start of ids) {
         if (seen.has(start)) continue;
@@ -128,7 +125,7 @@ var overpass = (function () {
     return linked;
   }
 
-  // Clipped geometry marks points outside the box as null, and a line must not jump across that gap.
+  // Clipped geometry marks points outside the box as null. A line must not jump across that gap.
   function splitAtGaps(way) {
     const lines = [];
     let line = [];
@@ -144,7 +141,7 @@ var overpass = (function () {
     return lines;
   }
 
-  // The next instance is only asked once one fails, so a slow but working query never runs on several servers at once.
+  // The next instance is only asked once one fails, so that a slow but working query never runs on several servers at once.
   async function run(data) {
     const errors = [];
     for (const url of URLS) {
@@ -158,7 +155,7 @@ var overpass = (function () {
         continue;
       }
       // Overpass reports a timeout or memory limit as an ordinary reply with no elements and an error remark.
-      // A query too big for one server is too big for the others, so it isn't passed on.
+      // A query too big for one server is too big for the others.
       if (/timed out|out of memory/i.test(json.remark || '')) throw new Error('OpenStreetMap lookup too large (' + json.remark.trim() + ')');
       if (!/error/i.test(json.remark || '')) return json.elements;
       errors.push(`${new URL(url).host}: ${json.remark.trim()}`);
