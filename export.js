@@ -39,6 +39,10 @@ var heightmapExport = (function () {
   const LEVEL_WATER_TOLERANCE = 3;
   // Real meters above such a channel's own surface that still count as its water, which keeps its banks dry.
   const CHANNEL_SURFACE_TOLERANCE = 0.5;
+  // In-game meters. OpenStreetMap rivers too narrow for land cover are cut as channels this wide.
+  const RIVER_LINE_WIDTH = 16;
+  // Real meters a river line may still sit above the level after lowering and be cut. A line drawn up a valley wall would cut a gash.
+  const RIVER_LINE_TOLERANCE = 5;
   // In-game meters.
   const BED_MAX_DEPTH = 10;
   // Rows of a full-size grid between progress reports, each a moment the page can repaint.
@@ -1114,12 +1118,12 @@ var heightmapExport = (function () {
     const lift = new Float32Array(n), lowered = new Uint8Array(n), atLevel = new Uint8Array(n);
     // The limit goes cell by cell, so a river climbing into hills still fills its lower reaches. A lake is flat, so it fills or stays dry whole.
     const bodies = new Uint8Array(count + 1);
-    let deepest = 0;
+    let deepest = 0, dryCells = 0;
     for (let i = 0; i < n; i++) {
       if (!kept[i]) continue;
       if (surface[i] - level > maxLift) {
         kept[i] = 0;
-        bodies[labels[i]] |= 4;
+        dryCells++;
         continue;
       }
       lift[i] = Math.max(0, surface[i] - level);
@@ -1128,7 +1132,16 @@ var heightmapExport = (function () {
       bodies[labels[i]] |= lowered[i] ? 2 : 1;
       deepest = Math.max(deepest, lift[i] * scale);
     }
-    const stats = {lowered: bodies.filter(b => b & 2).length, skipped: bodies.filter(b => b === 4).length, deepest: deepest};
+    // River lines are drawn at full resolution with their own width, so they stay out of the coarse shoreline rules below.
+    const lineClass = new Uint8Array(n);
+    if (rivers) {
+      for (let i = 0; i < n; i++) {
+        if (!rivers[i] || cover[i] === LC_WATER) continue;
+        lineClass[i] = lowered[i] ? 2 : atLevel[i] ? 1 : 0;
+        lowered[i] = atLevel[i] = 0;
+      }
+    }
+    const stats = {lowered: bodies.filter(b => b & 2).length, dryKm2: dryCells * cellMeters * cellMeters / 1e6, deepest: deepest};
     // Water at the level that surveys a little above it, like a tidal channel, has its own flat surface, which draws its shoreline.
     // The middle of its neighbors skips bank samples. Water at or below the level stays out of it.
     const channelSum = new Float32Array(n), channelWeight = new Float32Array(n), near = [];
@@ -1173,7 +1186,7 @@ var heightmapExport = (function () {
       const w = Math.max(0, 1 - distance[i] * gameCell / (2 * NORMALIZE_SEAM));
       offset[i] = exact[i] * w + offset[i] * (1 - w);
     }
-    return {offset: offset, lowered: lowered, channel: channel, level: level, guard: guard, gw: gw, gh: gh, stats: stats};
+    return {offset: offset, lowered: lowered, channel: channel, lineClass: lineClass, level: level, guard: guard, gw: gw, gh: gh, stats: stats};
   }
 
   // Fetches land cover and plans water normalization for an output. heights: real meters for the whole output, or null to fetch coarser ones.
@@ -1193,24 +1206,44 @@ var heightmapExport = (function () {
     }
     onStage('Fetching land cover...');
     const cover = await fetchImageServer(LANDCOVER_URL, region, gw, gh, 'U8', 'RSP_NearestNeighbor', f => onStage('Fetching land cover...', f));
-    return planWater(coarse, cover, gw, gh, groundWidth(region) / (gw - 1), GAME_METERS_PER_PIXEL * (width - 1) / (gw - 1), scale, level,
-      rivers ? riverCells(rivers, region, gw, gh) : null);
+    const lines = rivers ? riverPixels(rivers, region, width, height) : null;
+    const plan = await planWater(coarse, cover, gw, gh, groundWidth(region) / (gw - 1), GAME_METERS_PER_PIXEL * (width - 1) / (gw - 1), scale, level,
+      lines ? drawLines(lines, (gw - 1) / (width - 1), (gh - 1) / (height - 1), 0, 0, gw, gh, 0) : null);
+    if (plan) plan.lines = lines;
+    return plan;
   }
 
-  // Draws river courses, [[lat, lon], ...] lines, onto a gw x gh grid over region.
-  function riverCells(rivers, region, gw, gh) {
-    const cells = new Uint8Array(gw * gh);
+  // River courses, [[lat, lon], ...] lines, as [x0, y0, x1, y1, ...] in output pixels.
+  function riverPixels(rivers, region, width, height) {
     const centerLng = xToLng((region.x0 + region.x1) / 2);
-    // OpenStreetMap longitudes stay within -180 to 180, so they move to the copy of the world the region is in.
-    const gx = lng => (lngToX(lng + 360 * Math.round((centerLng - lng) / 360)) - region.x0) / (region.x1 - region.x0) * (gw - 1);
-    const gy = lat => (latToY(lat) - region.y0) / (region.y1 - region.y0) * (gh - 1);
-    for (const line of rivers) {
-      for (let p = 1; p < line.length; p++) {
-        const ax = gx(line[p - 1][1]), ay = gy(line[p - 1][0]), bx = gx(line[p][1]), by = gy(line[p][0]);
+    return rivers.map(line => {
+      const out = new Float64Array(line.length * 2);
+      line.forEach(([lat, lng], p) => {
+        // OpenStreetMap longitudes stay within -180 to 180, so they move to the copy of the world the region is in.
+        out[2 * p] = (lngToX(lng + 360 * Math.round((centerLng - lng) / 360)) - region.x0) / (region.x1 - region.x0) * (width - 1);
+        out[2 * p + 1] = (latToY(lat) - region.y0) / (region.y1 - region.y0) * (height - 1);
+      });
+      return out;
+    });
+  }
+
+  // Marks the cells of a width x height grid within radius of the lines, scaled by sx and sy, with the grid starting at output pixel (x0, y0).
+  function drawLines(lines, sx, sy, x0, y0, width, height, radius) {
+    const cells = new Uint8Array(width * height), brush = [];
+    for (let dy = -Math.ceil(radius); dy <= Math.ceil(radius); dy++) {
+      for (let dx = -Math.ceil(radius); dx <= Math.ceil(radius); dx++) if (dx * dx + dy * dy <= radius * radius) brush.push([dx, dy]);
+    }
+    for (const line of lines) {
+      for (let p = 2; p < line.length; p += 2) {
+        const ax = line[p - 2] * sx - x0, ay = line[p - 1] * sy - y0, bx = line[p] * sx - x0, by = line[p + 1] * sy - y0;
+        if (Math.max(ax, bx) < -radius - 1 || Math.min(ax, bx) > width + radius || Math.max(ay, by) < -radius - 1 || Math.min(ay, by) > height + radius) continue;
         const steps = Math.ceil(2 * Math.max(Math.abs(bx - ax), Math.abs(by - ay))) + 1;
         for (let s = 0; s <= steps; s++) {
-          const x = Math.round(ax + (bx - ax) * s / steps), y = Math.round(ay + (by - ay) * s / steps);
-          if (x >= 0 && y >= 0 && x < gw && y < gh) cells[y * gw + x] = 1;
+          const cx = Math.round(ax + (bx - ax) * s / steps), cy = Math.round(ay + (by - ay) * s / steps);
+          for (const [dx, dy] of brush) {
+            const x = cx + dx, y = cy + dy;
+            if (x >= 0 && y >= 0 && x < width && y < height) cells[y * width + x] = 1;
+          }
         }
       }
     }
@@ -1221,17 +1254,22 @@ var heightmapExport = (function () {
   // The grid covers output pixels x0 to x0 + width - 1 and y0 to y0 + height - 1 of an output outputWidth x outputHeight.
   // onProgress(fraction): optional, called every ROW_BATCH rows, and awaited.
   async function applyWaterPlan(plan, heights, width, height, x0, y0, outputWidth, outputHeight, onProgress) {
-    const {offset, lowered, channel, level, guard, gw, gh} = plan;
+    const {offset, lowered, channel, lineClass, level, guard, gw, gh} = plan;
     const sx = (gw - 1) / (outputWidth - 1), sy = (gh - 1) / (outputHeight - 1);
     const lifted = new Uint8Array(width * height);
+    const river = plan.lines ? drawLines(plan.lines, 1, 1, x0, y0, width, height, RIVER_LINE_WIDTH / GAME_METERS_PER_PIXEL / 2) : null;
     for (let j = 0; j < height; j++) {
       const v = Math.min(gh - 1, Math.max(0, (y0 + j) * sy)), r = Math.min(Math.floor(v), gh - 2), fy = v - r;
       for (let i = 0; i < width; i++) {
         const u = Math.min(gw - 1, Math.max(0, (x0 + i) * sx)), c = Math.min(Math.floor(u), gw - 2), fx = u - c, a = r * gw + c;
         const k = j * width + i, before = heights[k];
         heights[k] -= (offset[a] * (1 - fx) + offset[a + 1] * fx) * (1 - fy) + (offset[a + gw] * (1 - fx) + offset[a + gw + 1] * fx) * fy;
-        // The coarse land cover picks out the water. The full-resolution surface draws its exact shoreline.
-        if ((lowered[a] || lowered[a + 1] || lowered[a + gw] || lowered[a + gw + 1]) && heights[k] <= level + NORMALIZE_SURFACE_TOLERANCE) {
+        const line = river && river[k] ? lineClass[Math.round(v) * gw + Math.round(u)] : 0;
+        if (line && heights[k] <= level + RIVER_LINE_TOLERANCE) {
+          heights[k] = level;
+          if (line === 2) lifted[k] = 1;
+        } else if ((lowered[a] || lowered[a + 1] || lowered[a + gw] || lowered[a + gw + 1]) && heights[k] <= level + NORMALIZE_SURFACE_TOLERANCE) {
+          // The coarse land cover picks out the water. The full-resolution surface draws its exact shoreline.
           heights[k] = level;
           lifted[k] = 1;
         } else if (heights[k] > level && heights[k] <= level + LEVEL_WATER_TOLERANCE && heights[k] <= channelSurface(channel, a, gw, fx, fy) + CHANNEL_SURFACE_TOLERANCE) {

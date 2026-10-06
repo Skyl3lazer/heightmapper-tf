@@ -30,6 +30,8 @@ map = (function () {
   const STEEPNESS_WARNING = 4;
   // In-game meters the nudge options may move a town to find a spot where its first street works.
   const TOWN_NUDGE_REACH = 200;
+  // In-game meters. Shorter rivers are left out of water normalization, so maps covering a lot of real ground only fetch rivers that show at their scale.
+  const RIVER_MIN_LENGTH = 2000;
   const SIGN_GLYPHS = {warning: '\u26a0\ufe0e', info: '\u24d8'};
   const SETTINGS_KEY = 'heightmapper-settings', CONSENT_KEY = 'heightmapper-remember';
   // Panel choices kept between visits. Climate, the heights and the view follow the place on the map, so they aren't kept.
@@ -1088,7 +1090,7 @@ map = (function () {
   function normalizationNote(n, rivers) {
     if (!n) return '';
     if (typeof n == 'string') return ', water normalization ' + n;
-    return ', ' + n.lowered + ' water bodies lowered up to ' + Math.round(n.deepest) + ' in-game m' + (n.skipped ? ', ' + n.skipped + ' left dry over 100 m up' : '') +
+    return ', ' + n.lowered + ' water bodies lowered up to ' + Math.round(n.deepest) + ' in-game m' + (n.dryKm2 >= 0.05 ? ', ' + n.dryKm2.toFixed(1) + ' km2 left dry over 100 m up' : '') +
       (rivers ? ', ' + rivers : '');
   }
 
@@ -1096,8 +1098,8 @@ map = (function () {
   async function riverLines(job, report) {
     report('Looking up rivers...');
     try {
-      var ways = await overpass.ways(job.bounds, '["waterway"="river"]');
-      return {lines: ways.map(function(w) { return w.geometry.map(function(p) { return [p.lat, p.lon]; }); }), note: ways.length + ' OpenStreetMap river lines'};
+      var lines = await overpass.rivers(job.bounds, RIVER_MIN_LENGTH * job.mpp / GAME_METERS_PER_PIXEL);
+      return {lines: lines, note: lines.length + ' OpenStreetMap river lines'};
     } catch (e) {
       return {lines: null, note: 'river lines unavailable (' + e.message + ')'};
     }

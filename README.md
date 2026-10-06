@@ -62,7 +62,7 @@ Elevation data comes from the [AWS Terrain Tiles](https://registry.opendata.aws/
 - [OpenStreetMap](https://www.openstreetmap.org) - Reference map overlay
 - [NOAA DEM Global Mosaic](https://www.ncei.noaa.gov/maps-and-geospatial-products) - Bathymetry (underwater elevations)
 - [Esri / Impact Observatory (Sentinel2)](https://ic.imagery1.arcgis.com/arcgis/rest/services/Sentinel2_10m_LandCover/ImageServer) - Land Usage for biome mapping
-- [NextGIS](https://nextgis.com/) - OpenStreetMap's Overpass API data for town data, volcano locations
+- [NextGIS](https://nextgis.com/) - OpenStreetMap's Overpass API data for town data, volcano locations, and rivers
     - Backups for overpass provided by [Private.coffee](https://overpass.private.coffee),
     [Maps.mail.ru](https://maps.mail.ru/osm/tools/overpass/), and [Overpass](https://overpass-api.de/)
 
