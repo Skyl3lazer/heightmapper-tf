@@ -37,6 +37,12 @@ var heightmapExport = (function () {
   const NORMALIZE_SURFACE_TOLERANCE = 2;
   // Coarse cells lowered water may reach past the cells land cover gives it, where a cell less than half water still holds the true shore.
   const LOWERED_GROWTH = 0.5;
+  // Real meters below the waterline past which dry land counts as polder even where the water seems to reach it.
+  const POLDER_DEPTH = 1.5;
+  // Smaller enclosed low patches are hollows in tidal marsh and the like, which the water keeps.
+  const POLDER_MIN_KM2 = 1;
+  // Real meters from water past which low dry land counts as polder however the water reaches it. Tidal marsh lines the water closer in.
+  const POLDER_INLAND = 500;
   // Real meters mapped water that needs no lowering may sit above the level and still be filled. Tidal channels often survey this high.
   const LEVEL_WATER_TOLERANCE = 3;
   // Real meters above such a channel's own surface that still count as its water, which keeps its banks dry.
@@ -534,7 +540,7 @@ var heightmapExport = (function () {
         seaArea += areas[(i / width) | 0];
       }
     }
-    if (seaCells >= MIN_WATER_CELLS) surfaces.push({level: 0, top: 0, area: seaArea});
+    if (seaCells >= MIN_WATER_CELLS) surfaces.push({level: 0, top: 0, area: seaArea, sea: true});
 
     surfaces.sort((a, b) => a.level - b.level);
     const merged = [];
@@ -543,8 +549,9 @@ var heightmapExport = (function () {
       if (last && surface.level - last.base < WATER_MERGE_METERS) {
         last.top = Math.max(last.top, surface.top);
         last.area += surface.area;
+        last.sea = last.sea || surface.sea;
       } else {
-        merged.push({base: surface.level, top: surface.top, area: surface.area});
+        merged.push({base: surface.level, top: surface.top, area: surface.area, sea: surface.sea});
       }
     }
     // Dry land, sorted, so the share a water level would drown is a binary search.
@@ -564,7 +571,7 @@ var heightmapExport = (function () {
     }
     return {
       surfaces: merged
-        .map(m => ({level: m.base, top: m.top, areaKm2: m.area / 1e6}))
+        .map(m => ({level: m.base, top: m.top, areaKm2: m.area / 1e6, sea: Boolean(m.sea)}))
         .sort((a, b) => b.areaKm2 - a.areaKm2),
       floodShare: floodShare
     };
@@ -838,6 +845,9 @@ var heightmapExport = (function () {
     const realSpacing = groundWidth(region) / (gw - 1);
     const biome = new Uint8Array(gw * gh), mountains = new Uint8Array(gw * gh), water = new Uint8Array(gw * gh);
     const slope = new Float32Array(gw * gh);
+    // The heightmap raises polder land, so it stays land here too.
+    const dryness = signedDistance(cover.map(lc => dryLand(lc) ? 1 : 0), gw, gh);
+    const polders = polderLand(heights, gw, gh, waterLevel, i => dryness[i], POLDER_MIN_KM2 * 1e6 / realSpacing ** 2, Math.max(1, POLDER_INLAND / realSpacing));
     for (let y = 0; y < gh; y++) {
       for (let x = 0; x < gw; x++) {
         const i = y * gw + x;
@@ -845,7 +855,7 @@ var heightmapExport = (function () {
         const dy = (heights[Math.min(y + 1, gh - 1) * gw + x] - heights[Math.max(y - 1, 0) * gw + x]) / 2;
         slope[i] = Math.atan(Math.hypot(dx, dy) / realSpacing) * 180 / Math.PI;
         const lc = cover[i];
-        water[i] = lc === LC_WATER || heights[i] <= waterLevel ? 1 : 0;
+        water[i] = lc === LC_WATER || (heights[i] <= waterLevel && !polders[i]) ? 1 : 0;
         mountains[i] = slope[i] > MOUNTAIN_MASK_SLOPE ? 1 : 0;
         if (water[i]) biome[i] = 0;
         else if (lc === LC_SNOW || slope[i] > MOUNTAIN_BIOME_SLOPE) biome[i] = 4;
@@ -1090,7 +1100,7 @@ var heightmapExport = (function () {
   // terrain: the heights render returned for this output, read instead of fetching. smoothing and level: as for render.
   // plan: a water normalization plan for fetched patches, which render has already applied to terrain.
   async function terrainPatch(bounds, width, height, px, py, radius, options) {
-    const {terrain, smoothing, level, plan} = options;
+    const {terrain, smoothing, level, plan, polders} = options;
     const size = 2 * radius + 1;
     if (terrain) {
       const heights = new Float32Array(size * size);
@@ -1108,6 +1118,7 @@ var heightmapExport = (function () {
     const patch = {x0: region.x0 + (px - reach) * dx, x1: region.x0 + (px + reach) * dx, y0: region.y0 + (py - reach) * dy, y1: region.y0 + (py + reach) * dy};
     // Sampled exactly as render samples the map, so this is the terrain in the heightmap.
     const heights = await sampleRegion(patch, full, full, pickZoom(region.x1 - region.x0, width, 2), function () {});
+    if (polders) raisePolders(polders, heights, full, full, px - reach, py - reach, width, height);
     if (plan) await applyWaterPlan(plan, heights, full, full, px - reach, py - reach, width, height);
     if (!pad) return heights;
     await smoothLand(heights, full, full, smoothing, level);
@@ -1238,8 +1249,8 @@ var heightmapExport = (function () {
 
   // Fetches land cover and plans water normalization for an output. heights: real meters for the whole output, or null to fetch coarser ones.
   // onStage(stage, fraction): reports the downloads. rivers: optional, river courses as [[lat, lon], ...] lines.
-  // riverSlack: optional, real meters the courses may stray from their river.
-  async function planWaterFor(region, width, height, heights, scale, level, onStage, rivers, riverSlack) {
+  // riverSlack: optional, real meters the courses may stray from their river. cover: optional, land cover as landCoverFor gives it.
+  async function planWaterFor(region, width, height, heights, scale, level, onStage, rivers, riverSlack, cover) {
     const {width: gw, height: gh} = rasterSize(width, height);
     let coarse;
     if (heights) {
@@ -1252,9 +1263,7 @@ var heightmapExport = (function () {
       onStage('Fetching elevation tiles...', 0);
       coarse = await sampleRegion(region, gw, gh, pickZoom(region.x1 - region.x0, gw, 1), f => onStage('Fetching elevation tiles...', f));
     }
-    onStage('Fetching land cover...');
-    // Each cell takes its most common class. A point sample would make a whole cell of water out of any pond it happened to land on.
-    const cover = await fetchImageServer(LANDCOVER_URL, region, gw, gh, 'U8', 'RSP_Majority', f => onStage('Fetching land cover...', f));
+    cover = cover || await landCoverFor(region, width, height, onStage);
     const sx = (gw - 1) / (width - 1), sy = (gh - 1) / (height - 1), reach = (riverSlack || 0) / (groundWidth(region) / (gw - 1));
     let lines = rivers ? riverPixels(rivers, region, width, height) : null;
     if (lines && reach >= 1) lines = snapLines(lines, cover, gw, gh, sx, sy, reach);
@@ -1288,6 +1297,90 @@ var heightmapExport = (function () {
       }
       return Float64Array.from(out);
     });
+  }
+
+  // Land cover classes on the water plan's grid for an output. onStage(stage, fraction): reports the download.
+  function landCoverFor(region, width, height, onStage) {
+    const {width: gw, height: gh} = rasterSize(width, height);
+    onStage('Fetching land cover...');
+    // Each cell takes its most common class. A point sample would make a whole cell of water out of any pond it happened to land on.
+    return fetchImageServer(LANDCOVER_URL, region, gw, gh, 'U8', 'RSP_Majority', f => onStage('Fetching land cover...', f));
+  }
+
+  // Land cover classes of dry land. Marsh counts as water, and open sea has no land cover data at all.
+  function dryLand(lc) {
+    return lc !== LC_NO_DATA && lc !== LC_WATER && lc !== LC_FLOODED && lc !== LC_CLOUDS;
+  }
+
+  // Pixels of dry land at or below the waterline that the game's single water level would wrongly drown, marked with a nonzero value.
+  // That is land no water reaches through ground at or below the waterline, in patches of at least minPixels, like polders behind dikes,
+  // land more than POLDER_DEPTH below the waterline a whole land cover cell from water, like polders whose dikes the elevation data smooths away,
+  // and land inland cells or more from water. Low land open to the water, like tidal marsh, stays as it is.
+  // dryness(k): signed distance in land cover cells from pixel k to water, 0 or more on dry land.
+  function polderLand(heights, width, height, waterline, dryness, minPixels, inland) {
+    const DRY = 1, REACHED = 2, DEEP = 4, RAISE = 8, state = new Uint8Array(width * height);
+    let low = 0, tail = 0;
+    for (let k = 0; k < state.length; k++) if (heights[k] <= waterline) low++;
+    const queue = new Int32Array(low);
+    for (let k = 0; k < state.length; k++) {
+      if (!(heights[k] <= waterline)) continue;
+      const d = dryness(k);
+      if (d < 0) {
+        state[k] = REACHED;
+        queue[tail++] = k;
+      } else {
+        state[k] = DRY | (d >= inland || (d >= 1 && heights[k] < waterline - POLDER_DEPTH) ? DEEP : 0);
+      }
+    }
+    const spread = (k, from, to) => {
+      const x = k % width;
+      for (const n of [x > 0 ? k - 1 : -1, x < width - 1 ? k + 1 : -1, k - width, k + width]) {
+        if (n >= 0 && n < state.length && (state[n] & (DRY | REACHED | to)) === from) {
+          state[n] |= to;
+          queue[tail++] = n;
+        }
+      }
+    };
+    for (let head = 0; head < tail; head++) spread(queue[head], DRY, REACHED);
+    for (let k = 0; k < state.length; k++) {
+      if ((state[k] & (DRY | REACHED | RAISE)) !== DRY) continue;
+      tail = 0;
+      state[k] |= RAISE;
+      queue[tail++] = k;
+      for (let head = 0; head < tail; head++) spread(queue[head], DRY, RAISE);
+      if (tail < minPixels) for (let q = 0; q < tail; q++) state[queue[q]] |= REACHED;
+    }
+    for (let k = 0; k < state.length; k++) state[k] = state[k] & DEEP || (state[k] & (RAISE | REACHED)) === RAISE ? 1 : 0;
+    return state;
+  }
+
+  // The game has one water level, which would drown dry land enclosed below it, like polders. Such land goes one in-game meter above the water instead.
+  // cover: land cover as landCoverFor gives it. waterline: real meters at or below which the map is water.
+  // pixelMeters and cellMeters: real meters per output pixel and per land cover cell.
+  function polderPlan(cover, gw, gh, waterline, scale, pixelMeters, cellMeters) {
+    const dry = new Uint8Array(gw * gh);
+    for (let i = 0; i < dry.length; i++) dry[i] = dryLand(cover[i]) ? 1 : 0;
+    return {edge: signedDistance(dry, gw, gh), gw: gw, gh: gh, waterline: waterline, top: waterline + 1 / scale,
+      minPixels: POLDER_MIN_KM2 * 1e6 / pixelMeters ** 2, inland: Math.max(1, POLDER_INLAND / cellMeters)};
+  }
+
+  // Raises polder land by a polder plan. Returns how many pixels it raised in each row.
+  // The grid covers output pixels x0 to x0 + width - 1 and y0 to y0 + height - 1 of an output outputWidth x outputHeight.
+  function raisePolders(polders, heights, width, height, x0, y0, outputWidth, outputHeight) {
+    const {edge, gw, gh, waterline, top, minPixels, inland} = polders;
+    const sx = (gw - 1) / (outputWidth - 1), sy = (gh - 1) / (outputHeight - 1), raised = new Float64Array(height);
+    const land = polderLand(heights, width, height, waterline, k => {
+      const i = k % width, j = (k - i) / width;
+      const v = Math.min(gh - 1, Math.max(0, (y0 + j) * sy)), r = Math.min(Math.floor(v), gh - 2), fy = v - r;
+      const u = Math.min(gw - 1, Math.max(0, (x0 + i) * sx)), c = Math.min(Math.floor(u), gw - 2), fx = u - c, a = r * gw + c;
+      return (edge[a] * (1 - fx) + edge[a + 1] * fx) * (1 - fy) + (edge[a + gw] * (1 - fx) + edge[a + gw + 1] * fx) * fy;
+    }, minPixels, inland);
+    for (let k = 0; k < land.length; k++) {
+      if (!land[k]) continue;
+      heights[k] = top;
+      raised[(k / width) | 0]++;
+    }
+    return raised;
   }
 
   // River courses, [[lat, lon], ...] lines, as [x0, y0, x1, y1, ...] in output pixels.
@@ -1527,7 +1620,7 @@ var heightmapExport = (function () {
 
   // limits(peak): as for analyze. range(lo, hi): given the clamped data's extremes in meters, returns the {min, max} that map to black and white.
   // submerge: the {level, top} in meters for applyBathymetry, or null. smoothing: the blur's sigma in pixels, or 0.
-  // waterLevel: meters, anything at or below it stays out of the smoothing.
+  // waterLevel: meters, anything at or below it is water. It stays out of the smoothing, and dry land below it is raised above it.
   // normalizeWater: lower rivers and lakes onto the water surface limits gives, in real meters as waterSurface.
   // rivers: optional, river courses as [[lat, lon], ...] lines for normalization. riverSlack: optional, real meters they may stray from their river.
   // width and height are the region's, north up. northLeft turns the image a quarter left.
@@ -1542,10 +1635,19 @@ var heightmapExport = (function () {
     // limits sees the peak before normalization and smoothing, the same one the preview measures.
     const peak = highest(heights);
     const {floor, ceiling, scale, waterSurface} = limits(peak);
-    let normalized = null, lifted = null;
+    let normalized = null, lifted = null, cover = null, polders = null;
+    if (isFinite(waterLevel) && heights.some(h => h <= waterLevel)) {
+      try {
+        cover = await landCoverFor(region, width, height, onStage);
+        const {width: gw, height: gh} = rasterSize(width, height), areas = rowAreas(region, width, height);
+        polders = raisePolders(polderPlan(cover, gw, gh, waterLevel, scale, groundWidth(region) / (width - 1), groundWidth(region) / (gw - 1)), heights, width, height, 0, 0, width, height).reduce((sum, n, y) => sum + n * areas[y], 0) / 1e6;
+      } catch (e) {
+        polders = 'unavailable (' + e.message + ')';
+      }
+    }
     if (normalizeWater && isFinite(waterSurface)) {
       try {
-        const plan = await planWaterFor(region, width, height, heights, scale, waterSurface, onStage, rivers, riverSlack);
+        const plan = await planWaterFor(region, width, height, heights, scale, waterSurface, onStage, rivers, riverSlack, cover);
         if (plan) {
           onStage('Normalizing water...', 0);
           await yieldToPage();
@@ -1602,6 +1704,7 @@ var heightmapExport = (function () {
       cappedFraction: capped / heights.length,
       bathymetry: bathymetry,
       waterNormalization: normalized,
+      polders: polders,
       dataMinMeters: lo, dataMaxMeters: hi,
       sourceZoom: zoom,
       upsampled: (region.x1 - region.x0) * TILE_SIZE * 2 ** zoom < width - 1
@@ -1631,6 +1734,11 @@ var heightmapExport = (function () {
     render: render,
     renderBiomes: renderBiomes,
     terrainPatch: terrainPatch,
+    polders: async function (bounds, width, height, waterline, scale, onStage) {
+      const {width: gw, height: gh} = rasterSize(width, height);
+      const region = boundsToRegion(bounds);
+      return polderPlan(await landCoverFor(region, width, height, onStage), gw, gh, waterline, scale, groundWidth(region) / (width - 1), groundWidth(region) / (gw - 1));
+    },
     planWater: function (bounds, width, height, scale, level, onStage, rivers, riverSlack) {
       return planWaterFor(boundsToRegion(bounds), width, height, null, scale, level, onStage, rivers, riverSlack);
     },

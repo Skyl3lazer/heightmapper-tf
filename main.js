@@ -777,9 +777,10 @@ map = (function () {
     return choice ? choice.waterline - SHORE_TOLERANCE : null;
   }
 
+  // Dry land enclosed below sea level is raised above it instead of drowning, so the sea needs no flood limit. Raising land to a lake's level would flatten whole valleys.
   function autoWaterChoice(choices, areaKm2) {
     return choices.filter(function(c) {
-      return c.flood <= MAX_FLOOD_SHARE && c.flood * areaKm2 <= MAX_FLOOD_RATIO * c.areaKm2;
+      return c.sea || (c.flood <= MAX_FLOOD_SHARE && c.flood * areaKm2 <= MAX_FLOOD_RATIO * c.areaKm2);
     })[0] || null;
   }
 
@@ -791,10 +792,11 @@ map = (function () {
       var same = choices.filter(function(c) { return c.level == line.level; })[0];
       if (same) {
         same.areaKm2 += w.areaKm2;
+        same.sea = same.sea || w.sea;
         same.waterline = Math.max(same.waterline, line.waterline);
         same.flood = floodShare(same.waterline);
       } else {
-        choices.push({level: line.level, waterline: line.waterline, areaKm2: w.areaKm2, flood: floodShare(line.waterline)});
+        choices.push({level: line.level, waterline: line.waterline, areaKm2: w.areaKm2, flood: floodShare(line.waterline), sea: w.sea});
       }
     });
     return choices.sort(function(a, b) { return b.areaKm2 - a.areaKm2; });
@@ -815,7 +817,8 @@ map = (function () {
       return;
     }
     setBoxWater('water levels: ' + shown.slice(0, 4).map(function(c) {
-      var flood = c.flood > MAX_FLOOD_SHARE ? ', floods ' + Math.round(c.flood * 100) + '% of the map' : '';
+      var flood = c.sea ? (c.flood >= 0.005 ? ', raises ' + Math.round(c.flood * 100) + '% of the map above it' : '') :
+        c.flood > MAX_FLOOD_SHARE ? ', floods ' + Math.round(c.flood * 100) + '% of the map' : '';
       return c.level + ' (' + c.areaKm2.toFixed(1) + ' km2' + flood + ')';
     }).join(', ') + depthNote);
   }
@@ -1162,6 +1165,8 @@ map = (function () {
     return [
       'height scale ' + h.k + ', ' + steepnessText(h.k, job.mpp) + 'x real steepness, real elevations ' + m.blackMeters.toFixed(2) + ' to ' + m.whiteMeters.toFixed(2) + ' m',
       'water depth: ' + (m.bathymetry || (job.oceans ? 'no water on the map' : 'ocean data off, below sea level clamped to 0 m')) +
+        (typeof m.polders == 'number' && m.polders >= 0.05 ? ', ' + m.polders.toFixed(1) + ' km2 of dry land below the water level raised above it' : '') +
+        (typeof m.polders == 'string' ? ', polders ' + m.polders : '') +
         (job.smoothing ? ', land smoothed over ' + job.smoothing + ' in-game m' : '') + normalizationNote(m.waterNormalization, r.rivers),
       m.cappedFraction > 0 ? (m.cappedFraction * 100).toFixed(2) + '% of the map was above the game\'s ' + GAME_MAX_HEIGHT + ' m limit and was flattened. Lower the height scale to keep those peaks.' : null,
       'real ' + realSize(job.bounds) + ' at ' + m.metersPerPixel.toFixed(3) + ' m/px',
@@ -1221,8 +1226,9 @@ map = (function () {
   // terrain: the heightmap's own heights. Without it, each town site check fetches its own tiles.
   async function buildTowns(job, report, h, terrain) {
     var levels = townLevels(job, h);
-    // Fetched town sites need the same lowering the heightmap gets, planned once for the whole map.
+    // Fetched town sites need the same raising of polders and lowering of water the heightmap gets, planned once for the whole map.
     var plan = null;
+    var polders = !terrain && isFinite(levels.waterline) ? await heightmapExport.polders(job.bounds, job.out.width, job.out.height, levels.waterline, levels.k, report).catch(function() { return null; }) : null;
     if (job.waterNormalization && !terrain && isFinite(levels.waterline)) {
       var rivers = await riverLines(job, report);
       plan = await heightmapExport.planWater(job.bounds, job.out.width, job.out.height, levels.k, levels.waterline - SHORE_TOLERANCE, report, rivers.lines, rivers.slack);
@@ -1242,7 +1248,7 @@ map = (function () {
       heightScale: levels.k,
       terrainPatch: function(px, py, radius) {
         return heightmapExport.terrainPatch(job.bounds, job.out.width, job.out.height, px, py, radius,
-          {terrain: terrain, smoothing: job.smoothing / GAME_METERS_PER_PIXEL, level: levels.waterline, plan: plan});
+          {terrain: terrain, smoothing: job.smoothing / GAME_METERS_PER_PIXEL, level: levels.waterline, plan: plan, polders: polders});
       }
     }, job.towns));
     // Yellow: should grow. Orange: exported but may never grow. Blue: moved so it should grow. Red: skipped.
