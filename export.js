@@ -35,6 +35,8 @@ var heightmapExport = (function () {
   const NORMALIZE_SEAM = 200;
   // Real meters a lowered surface may still sit above the level and count as water, for survey steps along a river.
   const NORMALIZE_SURFACE_TOLERANCE = 2;
+  // Share of the surrounding coarse cells that must be lowered water for an output pixel to join it. Below 0.5, so cells touching only at a corner stay joined.
+  const LOWERED_EDGE = 0.25;
   // Real meters mapped water that needs no lowering may sit above the level and still be filled. Tidal channels often survey this high.
   const LEVEL_WATER_TOLERANCE = 3;
   // Real meters above such a channel's own surface that still count as its water, which keeps its banks dry.
@@ -1228,7 +1230,8 @@ var heightmapExport = (function () {
 
   // Fetches land cover and plans water normalization for an output. heights: real meters for the whole output, or null to fetch coarser ones.
   // onStage(stage, fraction): reports the downloads. rivers: optional, river courses as [[lat, lon], ...] lines.
-  async function planWaterFor(region, width, height, heights, scale, level, onStage, rivers) {
+  // riverSlack: optional, real meters the courses may stray from their river.
+  async function planWaterFor(region, width, height, heights, scale, level, onStage, rivers, riverSlack) {
     const {width: gw, height: gh} = rasterSize(width, height);
     let coarse;
     if (heights) {
@@ -1242,12 +1245,41 @@ var heightmapExport = (function () {
       coarse = await sampleRegion(region, gw, gh, pickZoom(region.x1 - region.x0, gw, 1), f => onStage('Fetching elevation tiles...', f));
     }
     onStage('Fetching land cover...');
-    const cover = await fetchImageServer(LANDCOVER_URL, region, gw, gh, 'U8', 'RSP_NearestNeighbor', f => onStage('Fetching land cover...', f));
-    const lines = rivers ? riverPixels(rivers, region, width, height) : null;
+    // Each cell takes its most common class. A point sample would make a whole cell of water out of any pond it happened to land on.
+    const cover = await fetchImageServer(LANDCOVER_URL, region, gw, gh, 'U8', 'RSP_Majority', f => onStage('Fetching land cover...', f));
+    const sx = (gw - 1) / (width - 1), sy = (gh - 1) / (height - 1), reach = (riverSlack || 0) / (groundWidth(region) / (gw - 1));
+    let lines = rivers ? riverPixels(rivers, region, width, height) : null;
+    if (lines && reach >= 1) lines = snapLines(lines, cover, gw, gh, sx, sy, reach);
     const plan = await planWater(coarse, cover, gw, gh, rowAreas(region, gw, gh), GAME_METERS_PER_PIXEL * (width - 1) / (gw - 1), scale, level,
-      lines ? drawLines(lines, (gw - 1) / (width - 1), (gh - 1) / (height - 1), 0, 0, gw, gh, 0) : null);
+      lines ? drawLines(lines, sx, sy, 0, 0, gw, gh, 0) : null);
     if (plan) plan.lines = lines;
     return plan;
+  }
+
+  // Moves lines in output pixels onto the nearest land cover water within reach grid cells, after splitting them into steps of one cell.
+  // A line that strays from its river then runs in the river where land cover sees it, and bridges its gaps instead of cutting a second channel beside it.
+  // sx, sy: grid cells per output pixel.
+  function snapLines(lines, cover, gw, gh, sx, sy, reach) {
+    const water = new Uint8Array(gw * gh), nearest = new Int32Array(gw * gh);
+    for (let i = 0; i < water.length; i++) {
+      water[i] = cover[i] === LC_WATER ? 1 : 0;
+      nearest[i] = i;
+    }
+    const distance = distanceTo(water, gw, gh, nearest);
+    return lines.map(line => {
+      const out = [];
+      const add = (x, y) => {
+        const u = Math.round(x * sx), v = Math.round(y * sy), i = v * gw + u;
+        if (u >= 0 && v >= 0 && u < gw && v < gh && distance[i] <= reach) out.push(nearest[i] % gw / sx, Math.floor(nearest[i] / gw) / sy);
+        else out.push(x, y);
+      };
+      add(line[0], line[1]);
+      for (let p = 2; p < line.length; p += 2) {
+        const ax = line[p - 2], ay = line[p - 1], steps = Math.ceil(Math.hypot((line[p] - ax) * sx, (line[p + 1] - ay) * sy));
+        for (let s = 1; s <= steps; s++) add(ax + (line[p] - ax) * s / steps, ay + (line[p + 1] - ay) * s / steps);
+      }
+      return Float64Array.from(out);
+    });
   }
 
   // River courses, [[lat, lon], ...] lines, as [x0, y0, x1, y1, ...] in output pixels.
@@ -1308,8 +1340,9 @@ var heightmapExport = (function () {
           heights[k] = level;
           if (line === 2) lifted[k] = 1;
           continue;
-        } else if ((lowered[a] || lowered[a + 1] || lowered[a + gw] || lowered[a + gw + 1]) && heights[k] <= level + NORMALIZE_SURFACE_TOLERANCE) {
-          // The coarse land cover picks out the water. The full-resolution surface draws its exact shoreline.
+        } else if ((lowered[a] * (1 - fx) + lowered[a + 1] * fx) * (1 - fy) + (lowered[a + gw] * (1 - fx) + lowered[a + gw + 1] * fx) * fy >= LOWERED_EDGE &&
+          heights[k] <= level + NORMALIZE_SURFACE_TOLERANCE) {
+          // The coarse land cover picks out the water, blended between cells so its outline doesn't show as squares. The full-resolution surface draws the shoreline.
           heights[k] = level;
           lifted[k] = 1;
         } else if (heights[k] > level && heights[k] <= level + LEVEL_WATER_TOLERANCE && heights[k] <= channelSurface(channel, a, gw, fx, fy) + CHANNEL_SURFACE_TOLERANCE) {
@@ -1483,10 +1516,10 @@ var heightmapExport = (function () {
   // submerge: the {level, top} in meters for applyBathymetry, or null. smoothing: the blur's sigma in pixels, or 0.
   // waterLevel: meters, anything at or below it stays out of the smoothing.
   // normalizeWater: lower rivers and lakes onto the water surface limits gives, in real meters as waterSurface.
-  // rivers: optional, river courses as [[lat, lon], ...] lines for normalization.
+  // rivers: optional, river courses as [[lat, lon], ...] lines for normalization. riverSlack: optional, real meters they may stray from their river.
   // width and height are the region's, north up. northLeft turns the image a quarter left.
   async function render(options) {
-    const {bounds, width, height, bitDepth, range, limits, submerge, smoothing, waterLevel, northLeft, normalizeWater, rivers} = options;
+    const {bounds, width, height, bitDepth, range, limits, submerge, smoothing, waterLevel, northLeft, normalizeWater, rivers, riverSlack} = options;
     const onProgress = options.onProgress || function () {};
     const onStage = options.onStage || function () {};
     const region = boundsToRegion(bounds);
@@ -1499,7 +1532,7 @@ var heightmapExport = (function () {
     let normalized = null, lifted = null;
     if (normalizeWater && isFinite(waterSurface)) {
       try {
-        const plan = await planWaterFor(region, width, height, heights, scale, waterSurface, onStage, rivers);
+        const plan = await planWaterFor(region, width, height, heights, scale, waterSurface, onStage, rivers, riverSlack);
         if (plan) {
           onStage('Normalizing water...', 0);
           await yieldToPage();
@@ -1585,8 +1618,8 @@ var heightmapExport = (function () {
     render: render,
     renderBiomes: renderBiomes,
     terrainPatch: terrainPatch,
-    planWater: function (bounds, width, height, scale, level, onStage, rivers) {
-      return planWaterFor(boundsToRegion(bounds), width, height, null, scale, level, onStage, rivers);
+    planWater: function (bounds, width, height, scale, level, onStage, rivers, riverSlack) {
+      return planWaterFor(boundsToRegion(bounds), width, height, null, scale, level, onStage, rivers, riverSlack);
     },
     zip: makeZip,
     yieldToPage: yieldToPage

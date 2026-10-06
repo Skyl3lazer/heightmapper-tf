@@ -15,7 +15,7 @@ var overpass = (function () {
   const TIMEOUT_MS = 100000;
   // Bigger boxes are looked up in tiles this size, one after another, so no single river query hits the server's limits.
   const RIVER_TILE_DEGREES = 3;
-  // Past this many tiles a lookup runs for minutes, up to thousands of queries for the whole world, so such maps go without river lines.
+  // Past this many tiles a lookup runs for minutes, up to thousands of queries for the whole world, so rivers() declines such maps.
   const RIVER_MAX_TILES = 24;
 
   function configuredUrl() {
@@ -45,6 +45,7 @@ var overpass = (function () {
   // River courses inside bounds at least minLength real meters long, and shorter ones linking them, as [[lat, lon], ...] lines clipped to the box.
   // OpenStreetMap often splits a river into many short pieces, so pieces are first listed with only their name and length, which is small.
   // A named river is judged by the length of all its pieces together, and only the pieces of rivers that pass are fetched with their points.
+  // Returns null for a box needing more than RIVER_MAX_TILES tiles.
   async function rivers(bounds, minLength) {
     const rows = Math.ceil((bounds.north - bounds.south) / RIVER_TILE_DEGREES), cols = Math.ceil((bounds.east - bounds.west) / RIVER_TILE_DEGREES);
     const tiles = [];
@@ -56,7 +57,7 @@ var overpass = (function () {
         }).map(b => b.join(',')));
       }
     }
-    if (tiles.length > RIVER_MAX_TILES) throw new Error('the map covers too much ground to look them up');
+    if (tiles.length > RIVER_MAX_TILES) return null;
     const pieces = new Map(), totals = new Map();
     for (const [t, boxes] of tiles.entries()) {
       const ways = boxes.map(box => `way["waterway"="river"](${box});`).join('');

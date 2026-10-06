@@ -32,6 +32,10 @@ map = (function () {
   const TOWN_NUDGE_REACH = 200;
   // In-game meters. Shorter rivers are left out of water normalization, so maps covering a lot of real ground only fetch rivers that show at their scale.
   const RIVER_MIN_LENGTH = 2000;
+  // Natural Earth ranks rivers by the web map zoom they first show at. A map takes them this many zoom levels later, which gives a world map its few dozen greatest rivers.
+  const NATURAL_EARTH_ZOOM_LAG = 1.8;
+  // Real meters Natural Earth's simplified courses can stray from their river, so they move onto land cover water that close.
+  const NATURAL_EARTH_SLACK = 2500;
   // Unicode has no Erlenmeyer flask, so experimental options take the alembic, another piece of lab glassware.
   const SIGN_GLYPHS = {warning: '\u26a0\ufe0e', info: '\u24d8', experimental: '\u2697\ufe0e'};
   const SETTINGS_KEY = 'heightmapper-settings', CONSENT_KEY = 'heightmapper-remember';
@@ -895,7 +899,7 @@ map = (function () {
   var tasksRunning = false;
 
   // Snapshots the settings when an export is queued, so panning or editing afterwards doesn't change what it writes.
-  // run(job, report) resolves to the summary lines shown once the task finishes.
+  // run(job, report) resolves to {lines, game}: the summary lines shown once the task finishes, and for a heightmap the {min, max, water} to import it with.
   function queueTask(label, run, needsHeights) {
     var job;
     try {
@@ -920,7 +924,9 @@ map = (function () {
       task.state = 'running';
       renderTasks();
       try {
-        task.lines = await task.run(task.job, reporter(task));
+        var result = await task.run(task.job, reporter(task));
+        task.lines = result.lines;
+        task.game = result.game || null;
         task.state = 'done';
       } catch (e) {
         task.lines = [e.message];
@@ -970,6 +976,7 @@ map = (function () {
         t.view.fill = t.view.bar.appendChild(element('div', 'task-fill'));
         t.view.text = item.appendChild(element('div', 'task-text'));
       } else if (t.open && t.lines.length) {
+        if (t.game) item.appendChild(element('div', 'task-import', 'Import Variables:\nMin Height: ' + t.game.min + '\nMax Height: ' + t.game.max + '\nWater Level: ' + t.game.water));
         item.appendChild(element('div', 'task-text', t.lines.join('\n')));
       }
       list.appendChild(item);
@@ -1068,6 +1075,7 @@ map = (function () {
       waterLevel: dry ? -Infinity : h.waterline,
       normalizeWater: job.waterNormalization,
       rivers: rivers.lines,
+      riverSlack: rivers.slack,
       northLeft: job.northLeft,
       meta: meta,
       onProgress: function(fraction) {
@@ -1096,21 +1104,62 @@ map = (function () {
       (rivers ? ', ' + rivers : '');
   }
 
-  // OpenStreetMap river courses for water normalization, since land cover can't see narrow rivers. The export goes on without them if the lookup fails.
+  // River courses for water normalization, since land cover can't see narrow rivers. The export goes on without them if the lookup fails.
+  // Maps too big for an OpenStreetMap lookup take Natural Earth's major rivers instead.
   async function riverLines(job, report) {
     report('Looking up rivers...');
     try {
       var lines = await overpass.rivers(job.bounds, RIVER_MIN_LENGTH * job.mpp / GAME_METERS_PER_PIXEL);
-      return {lines: lines, note: lines.length + ' OpenStreetMap river lines'};
+      if (lines) return {lines: lines, note: lines.length + ' OpenStreetMap river lines'};
+      // The web map zoom whose pixels match the export's.
+      var zoom = Math.log2((job.out.width - 1) * 360 / ((job.bounds.east - job.bounds.west) * 256));
+      lines = await naturalEarthRivers(job.bounds, zoom - NATURAL_EARTH_ZOOM_LAG);
+      return {lines: lines, note: lines.length + ' Natural Earth river lines', slack: NATURAL_EARTH_SLACK};
     } catch (e) {
       return {lines: null, note: 'river lines unavailable (' + e.message + ')'};
     }
   }
 
+  var naturalEarth = null;
+
+  // Natural Earth's 1:10m river courses that show by web map zoom maxZoom, as [[lat, lon], ...] lines reaching into bounds.
+  // The file holds [min_zoom, line, ...] entries, each line in thousandths of a degree, its first point whole and the rest as steps from the one before.
+  async function naturalEarthRivers(bounds, maxZoom) {
+    naturalEarth = naturalEarth || fetch('data/naturalearth-rivers.json').then(function(response) {
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      return response.json();
+    }).catch(function(e) {
+      naturalEarth = null;
+      throw e;
+    });
+    var centerLng = (bounds.west + bounds.east) / 2, lines = [];
+    (await naturalEarth).forEach(function(river) {
+      if (river[0] > maxZoom) return;
+      river.slice(1).forEach(function(steps) {
+        var lat = 0, lng = 0, line = [], inside = false;
+        function finish() {
+          if (line.length > 1 && inside) lines.push(line);
+          line = [];
+          inside = false;
+        }
+        for (var p = 0; p < steps.length; p += 2) {
+          lat += steps[p];
+          lng += steps[p + 1];
+          var point = [lat / 1000, lng / 1000 + 360 * Math.round((centerLng - lng / 1000) / 360)];
+          // Points move to the box's copy of the world, so a line crossing the far side of it from the box's center is cut there.
+          if (line.length && Math.abs(point[1] - line[line.length - 1][1]) > 180) finish();
+          line.push(point);
+          inside = inside || (point[0] <= bounds.north && point[0] >= bounds.south && point[1] >= bounds.west && point[1] <= bounds.east);
+        }
+        finish();
+      });
+    });
+    return lines;
+  }
+
   function heightmapSummary(r, job) {
     var m = r.meta, h = r.heights;
     return [
-      'Transport Fever import: Minimum Height ' + h.min + ', Maximum Height ' + h.max + ', Water Level ' + h.water,
       'height scale ' + h.k + ', ' + steepnessText(h.k, job.mpp) + 'x real steepness, real elevations ' + m.blackMeters.toFixed(2) + ' to ' + m.whiteMeters.toFixed(2) + ' m',
       'water depth: ' + (m.bathymetry || (job.oceans ? 'no water on the map' : 'ocean data off, below sea level clamped to 0 m')) +
         (job.smoothing ? ', land smoothed over ' + job.smoothing + ' in-game m' : '') + normalizationNote(m.waterNormalization, r.rivers),
@@ -1176,7 +1225,7 @@ map = (function () {
     var plan = null;
     if (job.waterNormalization && !terrain && isFinite(levels.waterline)) {
       var rivers = await riverLines(job, report);
-      plan = await heightmapExport.planWater(job.bounds, job.out.width, job.out.height, levels.k, levels.waterline - SHORE_TOLERANCE, report, rivers.lines);
+      plan = await heightmapExport.planWater(job.bounds, job.out.width, job.out.height, levels.k, levels.waterline - SHORE_TOLERANCE, report, rivers.lines, rivers.slack);
     }
     var safety = job.towns.safety;
     var reach = safety == 'nudge' || safety == 'force' ? TOWN_NUDGE_REACH : 0;
@@ -1250,8 +1299,8 @@ map = (function () {
     queueTask('Heightmap', async function(job, report) {
       var r = await buildHeightmap(job, report);
       saveAs(r.blob, job.name + '.png');
-      return ['Saved ' + job.name + '.png, ' + r.meta.width + 'x' + r.meta.height + ' ' + r.meta.bitDepth + '-bit grayscale']
-        .concat(heightmapSummary(r, job));
+      return {lines: ['Saved ' + job.name + '.png, ' + r.meta.width + 'x' + r.meta.height + ' ' + r.meta.bitDepth + '-bit grayscale']
+        .concat(heightmapSummary(r, job)), game: r.heights};
     }, true);
   }
 
@@ -1260,8 +1309,8 @@ map = (function () {
       var result = await buildBiomes(job, report);
       var files = biomeFiles(result, job.name);
       files.forEach(function(f) { saveAs(f.blob, f.path); });
-      return ['Saved ' + files.map(function(f) { return f.path; }).join(', ') + ', ' + job.image.width + 'x' + job.image.height + ', ' + job.climate]
-        .concat(biomeSummary(result), ['Put them in the game\'s biomes folder and import them after the heightmap.']);
+      return {lines: ['Saved ' + files.map(function(f) { return f.path; }).join(', ') + ', ' + job.image.width + 'x' + job.image.height + ', ' + job.climate]
+        .concat(biomeSummary(result), ['Put them in the game\'s biomes folder and import them after the heightmap.'])};
     }, true);
   }
 
@@ -1271,7 +1320,7 @@ map = (function () {
       saveAs(new Blob([result.lua], {type: 'text/plain'}), job.name + '_towns.lua');
       var lines = townSummary(result, job);
       lines[0] = 'Saved ' + lines[0];
-      return lines;
+      return {lines: lines};
     }, true);
   }
 
@@ -1301,8 +1350,9 @@ map = (function () {
       }));
       if (towns) files.push({path: 'towns_industries/' + job.name + '.lua', blob: new Blob([towns.lua], {type: 'text/plain'})});
       saveAs(await heightmapExport.zip(files, function(f) { report('Writing ' + zipName + '...', f); }), zipName);
-      return ['Saved ' + zipName + ' for ' + job.climate + '. Extract it into the Transport Fever 3 user folder, %APPDATA%\\Transport Fever 3.']
-        .concat(heightmapSummary(heightmap, job).slice(0, 4), biomeSummary(biomes), towns ? townSummary(towns, job) : ['towns left out because ' + townError]);
+      return {lines: ['Saved ' + zipName + ' for ' + job.climate + '. Extract it into the Transport Fever 3 user folder, %APPDATA%\\Transport Fever 3.']
+        .concat(heightmapSummary(heightmap, job).slice(0, 3), biomeSummary(biomes), towns ? townSummary(towns, job) : ['towns left out because ' + townError]),
+        game: heightmap.heights};
     }, true);
   }
 
