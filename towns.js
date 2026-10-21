@@ -7,6 +7,8 @@ var townExport = (function () {
   const GAME_METERS_PER_PIXEL = 4;
   // Matches the gap the game's own town generator leaves along the map edge.
   const EDGE_MARGIN = 800;
+  // In-game meters a place just past the margin moves in to clear it, so a big city on the box's edge, like Lviv, isn't left out over a few meters.
+  const EDGE_SNAP = 200;
   const SIZE_RANGE = [0.55, 2.6];
   const DEFAULT_POPULATION = {city: 50000, town: 10000, village: 1000};
   // Overpass can't rank by population. Smaller types are fetched only while the larger ones leave the map short of towns.
@@ -225,7 +227,10 @@ var townExport = (function () {
       const p = heightmapExport.project(lat, lon);
       const x = snap(((p.x - nw.x) / (se.x - nw.x) - 0.5) * 2 * halfX);
       const y = snap((0.5 - (p.y - nw.y) / (se.y - nw.y)) * 2 * halfY);
-      return Math.abs(x) > halfX - EDGE_MARGIN || Math.abs(y) > halfY - EDGE_MARGIN ? null : {x: x, y: y};
+      const limitX = Math.floor((halfX - EDGE_MARGIN) / GAME_METERS_PER_PIXEL) * GAME_METERS_PER_PIXEL;
+      const limitY = Math.floor((halfY - EDGE_MARGIN) / GAME_METERS_PER_PIXEL) * GAME_METERS_PER_PIXEL;
+      if (Math.abs(x) > limitX + EDGE_SNAP || Math.abs(y) > limitY + EDGE_SNAP) return null;
+      return {x: Math.max(-limitX, Math.min(limitX, x)), y: Math.max(-limitY, Math.min(limitY, y))};
     }
     // Places of one type, looked up in tiles of at most maxKm2 so no lookup runs into Overpass's time limit. report(fraction): called as tiles finish.
     async function lookUp(tag, maxKm2, report) {

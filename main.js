@@ -28,6 +28,8 @@ map = (function () {
   const SHORE_TOLERANCE = 0.5;
   // Steepness above this tends to look out of place in the game.
   const STEEPNESS_WARNING = 4;
+  // Auto relief shaping works on maps at least this many times as steep as real. Nearer real scale the land already looks as it should.
+  const RELIEF_AUTO_STEEPNESS = 2;
   // In-game meters the nudge options may move a town to find a spot where its first street works.
   const TOWN_NUDGE_REACH = 200;
   // In-game meters. Shorter rivers are left out of water normalization. A map covering a lot of real ground then only fetches rivers that show at its scale.
@@ -36,12 +38,32 @@ map = (function () {
   const NATURAL_EARTH_ZOOM_LAG = 1.8;
   // Real meters Natural Earth's simplified courses can stray from their river. They move onto land cover water this close.
   const NATURAL_EARTH_SLACK = 2500;
+  // Real meters across for Natural Earth's rivers, by the web map zoom they first show at.
+  const NATURAL_EARTH_WIDTHS = [[2.1, 1000], [3, 600], [4.7, 350], [5, 200], [6.5, 120], [Infinity, 70]];
+  // Real meters across a river must be to be carved, unless its checkbox says otherwise.
+  const RIVER_WIDTH_THRESHOLDS = ['0 m', '10 m', '25 m', '50 m', '100 m', '250 m', '500 m', '1000 m'];
+  // A river known only by its length is about 0.44 real meters across per km of its length to the power 0.9, roughly how rivers widen downstream.
+  const RIVER_WIDTH_PER_KM = 0.44, RIVER_WIDTH_POWER = 0.9;
+  // A width tag more than this many times what the river's length or land cover suggests, and over RIVER_TAG_FLOOR meters, is a mistake, like 23800 on a small river.
+  const RIVER_TAG_TRUST = 20, RIVER_TAG_FLOOR = 10;
+  // Share of a river's length its width tags must cover to stand for the whole river. Tags on a few reaches, often the upper ones, only raise its estimate.
+  const RIVER_TAG_SHARE = 0.5;
+  // In-game meters. A river's width at the map's scale grows into its in-game width by its square root, which leaves this width as it is.
+  const RIVER_WIDTH_PIVOT = 64;
+  // In-game meters of channel depth per in-game meter of width, and the least depth a channel gets.
+  const RIVER_DEPTH_RATIO = 0.25, RIVER_MIN_DEPTH = 4;
+  // Real meters across a river must be for its channel to get the navigable width, room for ships and a river port.
+  const NAVIGABLE_THRESHOLDS = ['off', '100 m', '140 m', '180 m', '250 m', '500 m'];
+  // Rivers with their own checkbox, widest first. The rest follow the width threshold.
+  const RIVER_LIST_SIZE = 40;
+  // Real meters from the end of a river's course to another river that it flows into there.
+  const RIVER_MOUTH_REACH = 100;
   // Unicode has no Erlenmeyer flask. Experimental options take the alembic, another piece of lab glassware.
   const SIGN_GLYPHS = {warning: '\u26a0\ufe0e', info: '\u24d8', experimental: '\u2697\ufe0e'};
   const SETTINGS_KEY = 'heightmapper-settings', CONSENT_KEY = 'heightmapper-remember';
   // Climate, the heights and the view are left out because they follow the place on the map.
-  const SAVED_SETTINGS = ['include_oceans', 'reference_map', 'mapSize', 'ratio', 'orientation', 'scaleMode', 'smoothing', 'oceanFloor', 'bitDepth',
-    'waterNormalization', 'normalizationLift', 'maxTowns', 'townSpacing', 'includeVillages', 'townNames', 'townSafety', 'fileName'];
+  const SAVED_SETTINGS = ['include_oceans', 'reference_map', 'mapSize', 'ratio', 'orientation', 'scaleMode', 'smoothing', 'forestCanopy', 'reliefMode', 'reliefGain', 'reliefMountain', 'oceanFloor', 'bitDepth',
+    'waterNormalization', 'normalizationLift', 'riverMinWidth', 'riverWidthMin', 'riverWidthMax', 'riverMaxDepth', 'navigableFrom', 'navigableWidth', 'maxTowns', 'townSpacing', 'includeVillages', 'townNames', 'townSafety', 'stateBorders', 'borderWidth', 'fileName'];
   // The game has one water level. A lake's level drowns all lower land. Auto mode skips levels drowning more than this share of the map.
   const MAX_FLOOD_SHARE = 0.15;
   // Auto mode also skips levels drowning more than this many times the water body's own area, like a tiny flat patch at the bottom of a dry valley.
@@ -138,6 +160,10 @@ map = (function () {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>'
   });
   var townLayer = L.layerGroup();
+  var riverLayer = L.layerGroup(), riverRenderer = L.canvas();
+  // The rivers last found, as findRivers gives them, or null. riverOverrides: river keys, and Natural Earth tiers as 'tier/' keys, whose checkbox differs from the width threshold.
+  // riverList: the panel's list of them. riversShown: the rivers the list and the map show now, or null.
+  var riverCatalog = null, riverOverrides = new Map(), riverList = null, riversShown = null;
 
   var gui;
   function addGUI () {
@@ -180,9 +206,20 @@ map = (function () {
     gui.heightScale = requestedText;
     gui.steepness = '';
     gui.smoothing = 0;
+    gui.forestCanopy = true;
+    gui.reliefMode = 'auto';
+    gui.reliefGain = 2.5;
+    gui.reliefMountain = 12;
     gui.oceanFloor = String(GAME_MIN_HEIGHT);
     gui.waterNormalization = false;
     gui.normalizationLift = 100;
+    gui.riverMinWidth = '0 m';
+    gui.riverWidthMin = 16;
+    gui.riverWidthMax = 200;
+    // This dat.gui version shows a number to the decimals of its starting value. A half meter start lets depths like 10.5 show.
+    gui.riverMaxDepth = 1.5;
+    gui.navigableFrom = '180 m';
+    gui.navigableWidth = 100;
     gui.bitDepth = 16;
     exportFolder.add(gui, 'mapSize', Object.keys(MAP_SIZES)).name('map size').onChange(updateExportBox);
     exportFolder.add(gui, 'ratio', RATIOS).name('ratio').onChange(regionChanged);
@@ -201,9 +238,27 @@ map = (function () {
     // This dat.gui version shows a number to the decimals of its starting value, which would round half meters away.
     smoothingRow.__precision = 2;
     smoothingRow.updateDisplay();
+    exportFolder.add(gui, 'forestCanopy').name('remove tree canopy').onChange(runAnalysis).__li.title =
+      'The elevation data measures the tops of the trees, so forests stand a few meters above the fields beside them, with a step at every edge. ' +
+      'This takes the canopy height, measured at the forest edges, off forest on gentle land and softens the edges. Where the data is bare ground, nothing changes.';
+    exportFolder.add(gui, 'reliefMode', ['auto', 'on', 'off']).name('relief shaping').onChange(function() {
+      showReliefRows();
+      runAnalysis();
+    }).__li.title = 'Scales the small hills and valleys on the land: up on flat land, which otherwise reads as a table at small height scales, ' +
+      'and down in mountains, which otherwise turn into needles. Auto shapes maps at least ' + RELIEF_AUTO_STEEPNESS + ' times as steep as real.';
+    exportFolder.add(gui, 'reliefGain', 1, 4).step(0.1).name('lowland detail (x)').onFinishChange(runAnalysis);
+    exportFolder.add(gui, 'reliefMountain', 4, 40).step(1).name('mountain relief (m)').onFinishChange(runAnalysis);
+    // step() rebuilds a slider row and hands back the old one.
+    var reliefRows = ['reliefGain', 'reliefMountain'].map(controller);
+    reliefRows[0].__li.title = 'How many times taller the small hills and valleys of flat land get. 1 leaves them as they are.';
+    reliefRows[1].__li.title = 'In-game meters. Rough land\'s hills and valleys are scaled toward about this height, so mountains keep their shape without needle peaks.';
+    function showReliefRows() {
+      reliefRows.forEach(function(row) { row.__li.style.display = gui.reliefMode == 'off' ? 'none' : ''; });
+      gui.onResize();
+    }
     onEdit(exportFolder.add(gui, 'oceanFloor').name('ocean floor (m)'), runAnalysis);
     var normalizationRow = exportFolder.add(gui, 'waterNormalization').name('water normalization').onChange(function() {
-      showLiftRow();
+      showNormalizationRows();
       runAnalysis();
     });
     showSign(addSign(normalizationRow, 'experimental'), 'Experimental: Water normalization that keeps rivers and other bodies of water at a singular water level, ' +
@@ -212,8 +267,36 @@ map = (function () {
     // step() rebuilds a slider row and hands back the old one.
     var liftRow = controller('normalizationLift');
     liftRow.__li.title = 'The most in-game meters water normalization lowers a river or lake. Water higher above the water level stays dry.';
-    function showLiftRow() {
-      liftRow.__li.style.display = gui.waterNormalization ? '' : 'none';
+    exportFolder.add(gui, 'riverMinWidth', RIVER_WIDTH_THRESHOLDS).name('carve rivers wider than').onChange(function() {
+      riverOverrides.clear();
+      showRivers(true);
+    });
+    exportFolder.add(gui, 'riverWidthMin', 4, 100).step(1).name('channel min width (m)').onFinishChange(function() { showRivers(true); });
+    exportFolder.add(gui, 'riverWidthMax', 16, 400).step(1).name('channel max width (m)').onFinishChange(function() { showRivers(true); });
+    exportFolder.add(gui, 'riverMaxDepth', 1, 30).step(0.5).name('channel max depth (m)').onFinishChange(function() { showRivers(true); });
+    exportFolder.add(gui, 'navigableFrom', NAVIGABLE_THRESHOLDS).name('navigable rivers wider than').onChange(function() { showRivers(true); });
+    exportFolder.add(gui, 'navigableWidth', 40, 300).step(1).name('navigable width (m)').onFinishChange(function() { showRivers(true); });
+    gui.findRivers = function () { findRiversNow(); };
+    exportFolder.add(gui, 'findRivers').name('find rivers');
+    var riverRows = [liftRow].concat(['riverMinWidth', 'riverWidthMin', 'riverWidthMax', 'riverMaxDepth', 'navigableFrom', 'navigableWidth', 'findRivers'].map(controller));
+    gui.riverMaxDepth = 12;
+    riverRows[4].updateDisplay();
+    riverRows[1].__li.title = 'Rivers at least this many real meters across are carved into the heightmap. 0 m carves every river found. The checkboxes in the river list override it.';
+    riverRows[2].__li.title = 'The narrowest in-game channel a carved river gets. Wider real rivers get wider channels, growing with the square root of their width.';
+    riverRows[3].__li.title = 'The widest in-game channel a carved river gets. Rivers land cover sees keep at least their real width.';
+    riverRows[4].__li.title = 'The deepest a river bed is cut below the water level, in in-game meters. Beds are a quarter as deep as the river is wide, at least ' + RIVER_MIN_DEPTH + ' m.';
+    riverRows[5].__li.title = 'Rivers at least this many real meters across get a channel at least as wide as the navigable width, room for ships and a river port, ' +
+      'where they run in the lowlands. Toward the mountains they narrow back to their own width.';
+    riverRows[6].__li.title = 'The in-game width of a navigable river\'s channel in the lowlands. Ships need about 70 m.';
+    riverRows[7].__li.title = 'Looks up the rivers in the box, ranks them by width and lists them, so you can pick which to carve. Exports look them up themselves when you skip this.';
+    riverList = document.createElement('li');
+    riverList.className = 'river-list';
+    riverList.style.display = 'none';
+    riverRows[7].__li.parentNode.insertBefore(riverList, riverRows[7].__li.nextSibling);
+    function showNormalizationRows() {
+      riverRows.forEach(function(row) { row.__li.style.display = gui.waterNormalization ? '' : 'none'; });
+      showRivers();
+      gui.onResize();
     }
     bitDepthHint = addSign(exportFolder.add(gui, 'bitDepth', [16, 8]).name('bit depth').onChange(updateHints), 'info');
     // dat.gui only recognizes plain functions as buttons, not async ones.
@@ -227,6 +310,16 @@ map = (function () {
       climateFollows = analysis !== null && value == suggestClimate(analysis);
       updateHints();
     }), 'info');
+    gui.stateBorders = false;
+    gui.borderWidth = 64;
+    biomeFolder.add(gui, 'stateBorders').name('draw state borders').onChange(showBorderRows).__li.title = 'Draws the state borders from OpenStreetMap on the land ' +
+      'as a strip of the hills biome, which the game shows as paler, drier grass. Borders through lakes and out at sea are left out. Along a river the strip mostly lies on its bed.';
+    biomeFolder.add(gui, 'borderWidth', 16, 200).step(1).name('border width (m)').__li.title = 'In-game meters across the border strip. The game blends biomes, so narrower strips fade away.';
+    var borderRow = controller('borderWidth');
+    function showBorderRows() {
+      borderRow.__li.style.display = gui.stateBorders ? '' : 'none';
+      gui.onResize();
+    }
     gui.exportBiomes = function () { exportBiomeMaps(); };
     biomeFolder.add(gui, 'exportBiomes').name('export biomes');
     biomeFolder.open();
@@ -264,7 +357,9 @@ map = (function () {
     }
     gui.add(gui, 'help');
     restoreSettings();
-    showLiftRow();
+    showNormalizationRows();
+    showReliefRows();
+    showBorderRows();
     updateEditable();
     
   }
@@ -324,7 +419,10 @@ map = (function () {
     }
     SAVED_SETTINGS.forEach(function(key) {
       var c = controller(key);
-      if (c && key in saved && validSetting(c, saved[key])) gui[key] = saved[key];
+      if (!(c && key in saved && validSetting(c, saved[key]))) return;
+      gui[key] = saved[key];
+      // A checkbox flips the value it last set itself, which updateDisplay leaves as it was.
+      if ('__prev' in c) c.__prev = saved[key];
     });
     if (typeof saved.request == 'string' && saved.request) {
       requestedText = saved.request;
@@ -439,6 +537,7 @@ map = (function () {
     showSign(scaleCapHint, r.capped ? "The map is capped at one copy of the world" : null);
     exportFolder.__controllers.forEach(function(c) { c.updateDisplay(); });
     placeBoxLabel();
+    showRivers();
   }
 
   // Keeps the real meters per pixel when the latitude changes.
@@ -689,6 +788,12 @@ map = (function () {
     return {level: Math.floor(k * waterline), waterline: waterline};
   }
 
+  // The real height normalized water ends at: just under the waterline, so the export takes it as water. Less than half an in-game meter under it,
+  // so the guard that keeps lowered land an in-game meter above the water still clears the waterline at large height scales.
+  function normalizedSurface(waterline, k) {
+    return waterline - Math.min(SHORE_TOLERANCE, 0.5 / k);
+  }
+
   // Real meters for applyBathymetry: everything at or below the waterline ends WATER_DEPTH under the in-game level.
   function submergeFor(level, waterline, k) {
     return {level: waterline, top: (level - WATER_DEPTH) / k};
@@ -717,7 +822,7 @@ map = (function () {
   async function runAnalysis() {
     var generation = ++analysisGeneration;
     try {
-      var out = outputSize();
+      var out = outputSize(), relief = reliefSettings(), mpp = metersPerPixel();
       setBoxWater('measuring...');
       setMeasuring(true);
       var result = await heightmapExport.analyze({
@@ -732,6 +837,8 @@ map = (function () {
         normalizeWater: gui.waterNormalization ? previewWaterSurface : null,
         normalizeLift: gui.normalizationLift,
         smoothing: gui.smoothing / GAME_METERS_PER_PIXEL,
+        canopy: gui.forestCanopy,
+        relief: function(k) { return reliefFor(relief, k, mpp); },
         outputWidth: out.width
       });
     } catch (e) {
@@ -765,9 +872,9 @@ map = (function () {
   // Where normalized water ends in the preview: just under the waterline of the level about to be picked, or of the typed one.
   function previewWaterSurface(water, floodShare, areaKm2) {
     var k = heightScale();
-    if (!gui.autoexpose) return Number(gui.waterLevel) / k - SHORE_TOLERANCE;
+    if (!gui.autoexpose) return normalizedSurface(Number(gui.waterLevel) / k, k);
     var choice = autoWaterChoice(waterChoices(water, k, floodShare, gui.include_oceans), areaKm2, true);
-    return choice ? choice.waterline - SHORE_TOLERANCE : null;
+    return choice ? normalizedSurface(choice.waterline, k) : null;
   }
 
   // Dry land enclosed below sea level is raised above it instead of drowning. The sea therefore needs no flood limit. Raising land to a lake's level would flatten whole valleys.
@@ -1012,17 +1119,39 @@ map = (function () {
     var out = outputSize();
     return {
       bounds: exportBounds(), out: out, northLeft: northLeft(), image: imageSize(), mpp: metersPerPixel(),
-      name: exportName(), mapName: mapName(), climate: gui.climate, bitDepth: Number(gui.bitDepth), smoothing: gui.smoothing,
+      name: exportName(), mapName: mapName(), climate: gui.climate, bitDepth: Number(gui.bitDepth), smoothing: gui.smoothing, canopy: gui.forestCanopy, relief: reliefSettings(), borders: gui.stateBorders ? Number(gui.borderWidth) : 0,
       auto: gui.autoexpose, oceans: gui.include_oceans, oceanFloor: needsHeights ? oceanFloor() : 0, waterNormalization: gui.waterNormalization,
       normalizationLift: gui.normalizationLift, request: needsHeights ? scaleRequest() : null, heights: needsHeights ? readHeights() : null, analysis: analysis,
       towns: {maxTowns: Math.round(gui.maxTowns), minSpacing: Number(gui.townSpacing), includeVillages: gui.includeVillages, originalNames: gui.townNames == 'original', safety: gui.townSafety},
-      view: viewKey()
+      rivers: riverSettings(), view: viewKey()
     };
   }
 
   // Changes whenever the live fields would stop describing an export queued now.
   function viewKey() {
-    return JSON.stringify([exportBounds(), outputSize(), gui.scaleMode, requestedText, gui.autoexpose, gui.include_oceans, gui.oceanFloor, gui.smoothing, gui.waterNormalization, gui.normalizationLift]);
+    return JSON.stringify([exportBounds(), outputSize(), gui.scaleMode, requestedText, gui.autoexpose, gui.include_oceans, gui.oceanFloor, gui.smoothing,
+      gui.forestCanopy, gui.reliefMode, gui.reliefGain, gui.reliefMountain, gui.waterNormalization, gui.normalizationLift,
+      gui.riverMinWidth, gui.riverWidthMin, gui.riverWidthMax, gui.riverMaxDepth, gui.navigableFrom, gui.navigableWidth, Array.from(riverOverrides)]);
+  }
+
+  // The relief shaping as it is now, for a job: the mode and the two sliders, rounded the way their boxes show them.
+  function reliefSettings() {
+    return {mode: gui.reliefMode, gain: Math.round(Number(gui.reliefGain) * 10) / 10, mountain: Math.round(Number(gui.reliefMountain))};
+  }
+
+  // The shaping relief settings give a map at height scale k and mpp real meters per pixel: {gain, mountain} as render takes it, or null.
+  // Auto goes by the steepness the scale ends up at, which auto-exposure may lower after the job is queued.
+  function reliefFor(relief, k, mpp) {
+    // The steepness as the field shows it: a typed 2 can come back from the scale's rounding a hair under 2.
+    var on = relief.mode == 'on' || (relief.mode == 'auto' && Number(steepnessText(k, mpp)) >= RELIEF_AUTO_STEEPNESS);
+    return on ? {gain: relief.gain, mountain: relief.mountain} : null;
+  }
+
+  // The river choices as they are now, for a job: the width threshold in real meters, the in-game width range and depth, and a copy of the checkboxes.
+  function riverSettings() {
+    return {threshold: parseFloat(gui.riverMinWidth) || 0, widthMin: Number(gui.riverWidthMin), widthMax: Math.max(Number(gui.riverWidthMin), Number(gui.riverWidthMax)),
+      maxDepth: Number(gui.riverMaxDepth), navigableFrom: parseFloat(gui.navigableFrom) || Infinity, navigableWidth: Number(gui.navigableWidth),
+      overrides: new Map(riverOverrides)};
   }
 
   function exportName() {
@@ -1038,7 +1167,7 @@ map = (function () {
     var h = job.auto && job.analysis ? heightsFor(job.analysis, job.heights.k, job.oceans, fixedMax(job.request), job.waterNormalization) :
       Object.assign({waterline: job.heights.water / job.heights.k}, job.heights);
     var meta = {heightScale: h.k, waterLevel: h.water, smoothing: job.smoothing};
-    var rivers = job.waterNormalization ? await riverLines(job, report) : {lines: null, note: null};
+    var rivers = job.waterNormalization ? await riverLines(job, report) : {rivers: null, note: null};
     // A water level under the minimum means the map has no water. Nothing is carved. The level follows the final minimum.
     var dry = h.water < h.min;
     var lowered = false;
@@ -1058,7 +1187,9 @@ map = (function () {
           Object.assign(meta, {heightScale: h.k, waterLevel: h.water});
         }
         // Normalized water ends just under the waterline, so the export takes it as water.
-        return Object.assign(limitsFor(h.k, job.oceanFloor), {waterSurface: h.water < h.min ? NaN : h.waterline - SHORE_TOLERANCE});
+        // River beds go down to the ocean floor with ocean data, and to the game's lowest height without it, where the rest stops at 0 m.
+        return Object.assign(limitsFor(h.k, job.oceanFloor), {waterSurface: h.water < h.min ? NaN : normalizedSurface(h.waterline, h.k),
+          riverFloor: (job.oceans ? job.oceanFloor : GAME_MIN_HEIGHT) / h.k});
       },
       // Auto mode widens to whole in-game meters if full resolution finds a higher peak or lower point than the preview.
       range: function(lo, hi) {
@@ -1076,8 +1207,12 @@ map = (function () {
       waterFromRiver: h.river,
       normalizeWater: job.waterNormalization,
       normalizeLift: job.normalizationLift,
-      rivers: rivers.lines,
+      rivers: rivers.rivers,
       riverSlack: rivers.slack,
+      riverBeds: rivers.rivers ? {ratio: RIVER_DEPTH_RATIO, min: RIVER_MIN_DEPTH, max: job.rivers.maxDepth} : null,
+      cover: rivers.cover,
+      canopy: job.canopy,
+      relief: function(k) { return reliefFor(job.relief, k, job.mpp); },
       northLeft: job.northLeft,
       meta: meta,
       onProgress: function(fraction) {
@@ -1103,28 +1238,311 @@ map = (function () {
     if (!n) return '';
     if (typeof n == 'string') return ', water normalization ' + n;
     return ', ' + n.lowered + ' water bodies lowered up to ' + Math.round(n.deepest) + ' in-game m' + (n.dryKm2 >= 0.05 ? ', ' + n.dryKm2.toFixed(1) + ' km2 left dry over ' + maxLift + ' m up' : '') +
-      (rivers ? ', ' + rivers : '');
+      (rivers ? ', ' + rivers : '') + (n.rivers ? riverNote(n.rivers) : '');
   }
 
-  // River courses for water normalization, since land cover can't see narrow rivers. The export goes on without them if the lookup fails.
-  // Maps too big for an OpenStreetMap lookup take Natural Earth's major rivers instead.
-  async function riverLines(job, report) {
+  // r: the river counts and beds render reports.
+  function riverNote(r) {
+    var missed = r.selected - r.carved;
+    return ', ' + r.carved + ' carved' + (r.removed ? ', ' + r.removed + ' left out of the water' : '') +
+      (r.deepest > 0 ? ', beds up to ' + Number(r.deepest.toFixed(1)) + ' in-game m deep' + (r.floored ? ' where the floor allowed' : '') : '') +
+      (missed > 0 ? ', ' + missed + ' chosen ' + (missed == 1 ? 'river' : 'rivers') + ' got no channel, being too high for the max water displacement or inside a lake' : '');
+  }
+
+  function catalogKey(bounds, out) {
+    return JSON.stringify([bounds, out]);
+  }
+
+  // Rivers for water normalization, since land cover can't see narrow rivers, each with the real meters across it's ranked and sized by.
+  // Maps too big for an OpenStreetMap lookup take Natural Earth's major rivers instead. Land cover measures the rivers it sees.
+  // Returns {key, source, slack, cover, rivers}: key as catalogKey, slack as for render, cover the land cover fetched for the job's output or null,
+  // and rivers widest first, each as overpass.rivers or naturalEarthRivers gives it plus realWidth, widthSource and measuredWidth.
+  async function findRivers(job, report) {
     report('Looking up rivers...');
-    try {
-      var lines = await overpass.rivers(job.bounds, RIVER_MIN_LENGTH * job.mpp / GAME_METERS_PER_PIXEL);
-      if (lines) return {lines: lines, note: lines.length + ' OpenStreetMap river lines'};
+    var source = 'OpenStreetMap', slack = 0;
+    var rivers = await overpass.rivers(job.bounds, RIVER_MIN_LENGTH * job.mpp / GAME_METERS_PER_PIXEL);
+    if (!rivers) {
       // The web map zoom whose pixels match the export's.
       var zoom = Math.log2((job.out.width - 1) * 360 / ((job.bounds.east - job.bounds.west) * 256));
-      lines = await naturalEarthRivers(job.bounds, zoom - NATURAL_EARTH_ZOOM_LAG);
-      return {lines: lines, note: lines.length + ' Natural Earth river lines', slack: NATURAL_EARTH_SLACK};
-    } catch (e) {
-      return {lines: null, note: 'river lines unavailable (' + e.message + ')'};
+      rivers = await naturalEarthRivers(job.bounds, zoom - NATURAL_EARTH_ZOOM_LAG);
+      source = 'Natural Earth';
+      slack = NATURAL_EARTH_SLACK;
     }
+    var cover = null, measured = [];
+    if (rivers.length) {
+      try {
+        cover = await heightmapExport.landCover(job.bounds, job.out.width, job.out.height, report);
+        measured = heightmapExport.measureRivers(job.bounds, job.out.width, job.out.height, rivers, cover);
+      } catch (e) {
+        cover = null;
+      }
+    }
+    rivers.forEach(function(r, i) { sizeRiver(r, measured[i]); });
+    // A river linking others is no wider than the narrowest of them.
+    var byKey = new Map(rivers.map(function(r) { return [r.key, r]; }));
+    rivers.forEach(function(r) {
+      var joined = (r.connects || []).map(function(key) { return byKey.get(key); }).filter(Boolean);
+      if (joined.length) r.realWidth = Math.min.apply(null, [r.realWidth].concat(joined.map(function(o) { return o.realWidth; })));
+    });
+    rivers.sort(function(a, b) { return b.realWidth - a.realWidth; });
+    findMouths(rivers);
+    return {key: catalogKey(job.bounds, job.out), source: source, slack: slack, cover: cover, rivers: rivers};
+  }
+
+  // A river's real meters across, from its width tags, else land cover, else Natural Earth's ranking, else its length.
+  function sizeRiver(river, measured) {
+    river.measuredWidth = measured > 0 ? measured : NaN;
+    var estimate = river.length > 0 ? RIVER_WIDTH_PER_KM * Math.pow(river.length / 1000, RIVER_WIDTH_POWER) : 0;
+    var tagged = river.width > 0 && river.width <= RIVER_TAG_TRUST * Math.max(estimate, measured > 0 ? measured : 0, RIVER_TAG_FLOOR) ? river.width : 0;
+    if (tagged && river.widthShare >= RIVER_TAG_SHARE) {
+      river.realWidth = tagged;
+      river.widthSource = 'tagged';
+    } else if (measured > 0) {
+      river.realWidth = measured;
+      river.widthSource = 'measured';
+    } else if (river.tier !== undefined) {
+      river.realWidth = NATURAL_EARTH_WIDTHS.filter(function(w) { return river.tier <= w[0]; })[0][1];
+      river.widthSource = 'ranked';
+    } else {
+      river.realWidth = Math.max(estimate, tagged);
+      river.widthSource = tagged > estimate ? 'tagged in part' : 'estimated';
+    }
+    river.realWidth = Math.max(1, river.realWidth);
+  }
+
+  // Sets each river's into: the keys of the rivers it flows into. OpenStreetMap's river ways point downstream, so a river flows into another
+  // where the last point of one of its lines lies on the other's course. Only the river's own ends count: a way's last point that another of its
+  // ways goes on from, or that clipping at a tile edge repeats, is not a mouth.
+  function findMouths(rivers) {
+    var cell = 0.01, grid = new Map(), keyOf = function(i, j) { return i + ',' + j; };
+    rivers.forEach(function(r) {
+      r.into = [];
+      r.lines.forEach(function(line) {
+        for (var p = 1; p < line.length; p++) {
+          var i0 = Math.floor(Math.min(line[p - 1][0], line[p][0]) / cell), i1 = Math.floor(Math.max(line[p - 1][0], line[p][0]) / cell);
+          var j0 = Math.floor(Math.min(line[p - 1][1], line[p][1]) / cell), j1 = Math.floor(Math.max(line[p - 1][1], line[p][1]) / cell);
+          for (var i = i0; i <= i1; i++) {
+            for (var j = j0; j <= j1; j++) {
+              var k = keyOf(i, j);
+              if (!grid.has(k)) grid.set(k, []);
+              grid.get(k).push([r, line[p - 1], line[p]]);
+            }
+          }
+        }
+      });
+    });
+    var pointKey = function(p) { return p[0].toFixed(6) + ',' + p[1].toFixed(6); };
+    rivers.forEach(function(r) {
+      var into = new Set(), inner = new Set();
+      r.lines.forEach(function(line) {
+        for (var p = 0; p < line.length - 1; p++) inner.add(pointKey(line[p]));
+      });
+      r.lines.forEach(function(line) {
+        var end = line[line.length - 1], scale = Math.cos(end[0] * Math.PI / 180);
+        if (inner.has(pointKey(end))) return;
+        for (var i = Math.floor(end[0] / cell) - 1; i <= Math.floor(end[0] / cell) + 1; i++) {
+          for (var j = Math.floor(end[1] / cell) - 1; j <= Math.floor(end[1] / cell) + 1; j++) {
+            (grid.get(keyOf(i, j)) || []).forEach(function(s) {
+              if (s[0] === r || into.has(s[0].key)) return;
+              var ax = (s[1][1] - end[1]) * scale, ay = s[1][0] - end[0], bx = (s[2][1] - end[1]) * scale, by = s[2][0] - end[0];
+              var dx = bx - ax, dy = by - ay, t = Math.max(0, Math.min(1, -(ax * dx + ay * dy) / (dx * dx + dy * dy || 1)));
+              if (Math.hypot(ax + dx * t, ay + dy * t) * 111320 <= RIVER_MOUTH_REACH) into.add(s[0].key);
+            });
+          }
+        }
+      });
+      r.into = Array.from(into);
+    });
+  }
+
+  // The keys of the rivers to carve: those at least threshold real meters across unless a checkbox says otherwise,
+  // Natural Earth's checked as a tier unless one is clicked on the map, and rivers linking others when all of those are carved.
+  // The rivers a carved river flows into are carved too, unless unchecked, so no carved river ends in one that isn't.
+  function selectedRivers(catalog, threshold, overrides) {
+    var chosen = new Set(), byKey = new Map(catalog.rivers.map(function(r) { return [r.key, r]; }));
+    catalog.rivers.forEach(function(r) {
+      if (r.connects) return;
+      var tier = r.tier !== undefined ? 'tier/' + r.tier : null;
+      if (overrides.has(r.key) ? overrides.get(r.key) : tier && overrides.has(tier) ? overrides.get(tier) : r.realWidth >= threshold) chosen.add(r.key);
+    });
+    var downstream = Array.from(chosen);
+    while (downstream.length) {
+      (byKey.get(downstream.pop()).into || []).forEach(function(key) {
+        var r = byKey.get(key), tier = r.tier !== undefined ? 'tier/' + r.tier : null;
+        if (chosen.has(key) || overrides.get(key) === false || (!overrides.has(key) && tier && overrides.get(tier) === false)) return;
+        chosen.add(key);
+        downstream.push(key);
+      });
+    }
+    catalog.rivers.forEach(function(r) {
+      if (!r.connects || chosen.has(r.key)) return;
+      if (overrides.has(r.key) ? overrides.get(r.key) : r.connects.length && r.connects.every(function(key) { return chosen.has(key); })) chosen.add(r.key);
+    });
+    return chosen;
+  }
+
+  // The keys of the rivers whose channels widen to the navigable width: those at least from real meters across, and the rivers they flow into,
+  // so no navigable channel ends in a narrow one.
+  function navigableRivers(catalog, from) {
+    var byKey = new Map(catalog.rivers.map(function(r) { return [r.key, r]; }));
+    var navigable = new Set(catalog.rivers.filter(function(r) { return r.realWidth >= from; }).map(function(r) { return r.key; })), downstream = Array.from(navigable);
+    while (downstream.length) {
+      (byKey.get(downstream.pop()).into || []).forEach(function(key) {
+        if (navigable.has(key) || !byKey.has(key)) return;
+        navigable.add(key);
+        downstream.push(key);
+      });
+    }
+    return navigable;
+  }
+
+  // In-game meters across a carved river, given real meters per pixel and the job's river settings.
+  function riverGameWidth(river, mpp, settings) {
+    return Math.min(settings.widthMax, Math.max(settings.widthMin, Math.sqrt(RIVER_WIDTH_PIVOT * river.realWidth * GAME_METERS_PER_PIXEL / mpp)));
+  }
+
+  // In-game meters a channel this many in-game meters wide is cut below the water along its middle.
+  function riverDepth(width, maxDepth) {
+    return Math.min(maxDepth, Math.max(RIVER_MIN_DEPTH, RIVER_DEPTH_RATIO * width));
+  }
+
+  // The rivers for a job's normalization, as render and planWater take them, found again unless the last ones found are for the job's box.
+  // The export goes on without rivers if the lookup fails.
+  async function riverLines(job, report) {
+    try {
+      var catalog = riverCatalog && riverCatalog.key == catalogKey(job.bounds, job.out) ? riverCatalog : await findRivers(job, report);
+      if (catalog !== riverCatalog) {
+        riverCatalog = catalog;
+        showRivers(true);
+      }
+      var chosen = selectedRivers(catalog, job.rivers.threshold, job.rivers.overrides), navigable = navigableRivers(catalog, job.rivers.navigableFrom);
+      return {
+        rivers: catalog.rivers.map(function(r) {
+          return {lines: r.lines, width: riverGameWidth(r, job.mpp, job.rivers), typical: r.measuredWidth > 0 ? r.measuredWidth : r.realWidth, selected: chosen.has(r.key),
+            navigable: navigable.has(r.key) ? job.rivers.navigableWidth : 0};
+        }),
+        slack: catalog.slack, cover: catalog.cover, note: chosen.size + ' of ' + catalog.rivers.length + ' ' + catalog.source + ' rivers chosen'
+      };
+    } catch (e) {
+      return {rivers: null, note: 'rivers unavailable (' + e.message + ')'};
+    }
+  }
+
+  function findRiversNow() {
+    queueTask('Rivers', async function(job, report) {
+      var catalog = await findRivers(job, report);
+      riverCatalog = catalog;
+      showRivers(true);
+      var chosen = selectedRivers(catalog, job.rivers.threshold, job.rivers.overrides);
+      return {lines: [catalog.rivers.length + ' ' + catalog.source + ' rivers found, ' + chosen.size + ' chosen' +
+        (catalog.cover ? '' : ', land cover unavailable so widths are estimated'),
+        catalog.rivers.slice(0, 5).map(riverLabel).join('\n')].filter(Boolean)};
+    }, false);
+  }
+
+  // Rivers sharing a name carry where they start.
+  function riverLabel(r) {
+    return (r.name || (r.tier !== undefined ? 'Natural Earth tier ' + r.tier + ' river' : 'unnamed river')) + (r.where ? ' (' + r.where.join(', ') + ')' : '') +
+      ' ~' + Math.round(r.realWidth) + ' m ' + r.widthSource;
+  }
+
+  // The river list and map overlay, while normalization is on and the rivers found are for the box as it is. force: redraw even if that hasn't changed.
+  function showRivers(force) {
+    if (!riverList) return;
+    var current = gui.waterNormalization && riverCatalog && riverCatalog.key == catalogKey(exportBounds(), outputSize()) ? riverCatalog : null;
+    if (current === riversShown && !force) return;
+    riversShown = current;
+    var old = riverList.querySelector('.river-rows'), scrolled = old ? old.scrollTop : 0;
+    riverLayer.clearLayers();
+    riverList.textContent = '';
+    riverList.style.display = current ? '' : 'none';
+    if (!current) {
+      map.removeLayer(riverLayer);
+      gui.onResize();
+      return;
+    }
+    var settings = riverSettings(), mpp = metersPerPixel(), chosen = selectedRivers(current, settings.threshold, riverOverrides), navigable = navigableRivers(current, settings.navigableFrom);
+    current.rivers.forEach(function(r) {
+      var on = chosen.has(r.key), width = riverGameWidth(r, mpp, settings);
+      L.polyline(r.lines, {renderer: riverRenderer, color: on ? '#3399ff' : '#a0a0a0', opacity: 0.9, dashArray: on ? null : '4,4', riverKey: r.key, riverOn: on,
+        weight: on ? 2 + 4 * (width - settings.widthMin) / Math.max(1, settings.widthMax - settings.widthMin) : 1.5})
+        // Leaflet reads a string as HTML. River names come from OpenStreetMap, so they go in as text.
+        .bindTooltip(element('span', '', riverLabel(r) + (on ? ', carved ' + Math.round(width) + ' m wide and ' + Number(riverDepth(width, settings.maxDepth).toFixed(1)) + ' m deep' +
+          (navigable.has(r.key) && settings.navigableWidth > width ? ', navigable, ' + settings.navigableWidth + ' m wide and ' +
+            Number(riverDepth(settings.navigableWidth, settings.maxDepth).toFixed(1)) + ' m deep in the lowlands' : '') : ', left out')), {sticky: true})
+        .on('click', clickRiver)
+        .addTo(riverLayer);
+    });
+    riverLayer.addTo(map);
+    var rows;
+    if (current.source == 'Natural Earth') {
+      var tiers = new Map();
+      current.rivers.forEach(function(r) {
+        var key = 'tier/' + r.tier, row = tiers.get(key) || {key: key, rivers: []};
+        row.rivers.push(r);
+        tiers.set(key, row);
+      });
+      // Lower tiers are the greater rivers. A tier with some of its rivers switched on the map shows as partly checked.
+      rows = Array.from(tiers.values()).sort(function(a, b) { return a.rivers[0].tier - b.rivers[0].tier; }).map(function(row) {
+        var widths = row.rivers.map(function(r) { return r.realWidth; }).sort(function(a, b) { return a - b; });
+        var on = row.rivers.filter(function(r) { return chosen.has(r.key); }).length;
+        return {key: row.key, label: 'Natural Earth tier ' + row.rivers[0].tier + ', ' + row.rivers.length + ' rivers ~' + Math.round(widths[widths.length >> 1]) + ' m',
+          on: on == row.rivers.length, mixed: on > 0 && on < row.rivers.length};
+      });
+    } else {
+      rows = current.rivers.filter(function(r) { return !r.connects; }).slice(0, RIVER_LIST_SIZE).map(function(r) {
+        return {key: r.key, label: riverLabel(r), on: chosen.has(r.key)};
+      });
+    }
+    var list = riverList.appendChild(element('div', 'river-rows'));
+    rows.forEach(function(row) {
+      var item = list.appendChild(element('label', 'river-row'));
+      var box = item.appendChild(document.createElement('input'));
+      box.type = 'checkbox';
+      box.checked = row.on;
+      box.indeterminate = Boolean(row.mixed);
+      box.onchange = function() { toggleRiver(row.key, box.checked); };
+      item.appendChild(element('span', 'river-name', row.label));
+    });
+    list.scrollTop = scrolled;
+    var rest = current.rivers.filter(function(r) { return !r.connects; }).length - (current.source == 'Natural Earth' ? current.rivers.length : rows.length);
+    riverList.appendChild(element('div', 'river-more', chosen.size + ' of ' + current.rivers.length + ' ' + current.source + ' rivers carved' +
+      (rest > 0 ? ', ' + rest + ' more not listed follow the width threshold' : '') + '. Click a river on the map to switch it.'));
+    gui.onResize();
+  }
+
+  // Every canvas line near the click takes it. Only the nearest switches, once per click.
+  function clickRiver(e) {
+    if (e.originalEvent._riverClicked) return;
+    e.originalEvent._riverClicked = true;
+    var nearest = null, best = Infinity;
+    riverLayer.eachLayer(function(layer) {
+      (layer._parts || []).forEach(function(part) {
+        for (var i = 1; i < part.length; i++) {
+          var d = L.LineUtil.pointToSegmentDistance(e.layerPoint, part[i - 1], part[i]);
+          if (d < best) {
+            best = d;
+            nearest = layer;
+          }
+        }
+      });
+    });
+    if (nearest) toggleRiver(nearest.options.riverKey, !nearest.options.riverOn);
+  }
+
+  // key: a river's key, or a Natural Earth tier's, which sets all of that tier's rivers.
+  function toggleRiver(key, on) {
+    if (key.indexOf('tier/') === 0 && riversShown) {
+      riversShown.rivers.forEach(function(r) { if ('tier/' + r.tier == key) riverOverrides.delete(r.key); });
+    }
+    riverOverrides.set(key, on);
+    showRivers(true);
   }
 
   var naturalEarth = null;
 
-  // Natural Earth's 1:10m river courses that show by web map zoom maxZoom, as [[lat, lon], ...] lines reaching into bounds.
+  // Natural Earth's 1:10m river courses that show by web map zoom maxZoom and reach into bounds, as rivers like overpass.rivers gives:
+  // {key, name, tier, lines}, tier being the zoom the river first shows at, and lines [[lat, lon], ...] in the box's copy of the world.
   // The file holds [min_zoom, line, ...] entries, each line in thousandths of a degree, its first point whole and the rest as steps from the one before.
   async function naturalEarthRivers(bounds, maxZoom) {
     naturalEarth = naturalEarth || fetch('data/naturalearth-rivers.json').then(function(response) {
@@ -1134,9 +1552,10 @@ map = (function () {
       naturalEarth = null;
       throw e;
     });
-    var centerLng = (bounds.west + bounds.east) / 2, lines = [];
-    (await naturalEarth).forEach(function(river) {
+    var centerLng = (bounds.west + bounds.east) / 2, rivers = [];
+    (await naturalEarth).forEach(function(river, index) {
       if (river[0] > maxZoom) return;
+      var lines = [];
       river.slice(1).forEach(function(steps) {
         var lat = 0, lng = 0, line = [], inside = false;
         function finish() {
@@ -1155,19 +1574,37 @@ map = (function () {
         }
         finish();
       });
+      if (lines.length) rivers.push({key: 'ne/' + index, name: null, tier: river[0], lines: lines});
     });
-    return lines;
+    return rivers;
+  }
+
+  // What canopy removal and relief shaping did, or null when neither ran.
+  function terrainNote(m) {
+    var notes = [];
+    if (typeof m.canopy == 'string') notes.push('tree canopy ' + m.canopy);
+    else if (m.canopy && m.canopy.meters > 0 && m.canopy.km2 > 0) notes.push('tree canopy of ' + m.canopy.meters + ' real m taken off ' + (m.canopy.km2 >= 10 ? Math.round(m.canopy.km2) : m.canopy.km2).toLocaleString() + ' km2 of forest');
+    else if (m.canopy && m.canopy.meters > 0) notes.push('no forest on gentle land to take the tree canopy off');
+    else if (m.canopy) notes.push('no tree canopy in the elevation data');
+    if (m.relief) notes.push('relief shaped, flat land\'s detail up to ' + m.relief.gain + 'x, mountains\' toward ' + m.relief.mountain + ' in-game m');
+    return notes.length ? 'terrain: ' + notes.join(', ') : null;
   }
 
   function heightmapSummary(r, job) {
-    var m = r.meta, h = r.heights;
+    var m = r.meta, h = r.heights, n = m.waterNormalization;
+    var carved = Boolean(n && n.rivers && n.rivers.deepest > 0);
     return [
       'height scale ' + h.k + ', ' + steepnessText(h.k, job.mpp) + 'x real steepness, real elevations ' + m.blackMeters.toFixed(2) + ' to ' + m.whiteMeters.toFixed(2) + ' m',
-      'water depth: ' + (m.bathymetry || (job.oceans ? 'no water on the map' : 'ocean data off, below sea level clamped to 0 m')) +
+      'water depth: ' + (m.bathymetry || (job.oceans ? 'no water on the map' : 'ocean data off, below sea level clamped to 0 m' + (carved ? ' except river beds' : ''))) +
         (typeof m.polders == 'number' && m.polders >= 0.05 ? ', ' + m.polders.toFixed(1) + ' km2 of dry land below the water level raised above it' : '') +
         (typeof m.polders == 'string' ? ', polders ' + m.polders : '') +
+        (typeof m.lowLand == 'number' && m.lowLand >= 0.05 ? ', ' + m.lowLand.toFixed(1) + ' km2 of narrow land at the water level, like sand spits, raised above it' : '') +
+        (typeof m.lowLand == 'string' ? ', narrow land at the water level ' + m.lowLand : '') +
         (job.smoothing ? ', land smoothed over ' + job.smoothing + ' in-game m' : '') + normalizationNote(m.waterNormalization, r.rivers, job.normalizationLift),
+      terrainNote(m),
       m.cappedFraction > 0 ? (m.cappedFraction * 100).toFixed(2) + '% of the map was above the game\'s ' + GAME_MAX_HEIGHT + ' m limit and was flattened. Lower the height scale to keep those peaks.' : null,
+      // Auto-exposure lowers the minimum to the deepest bed. The heights are 32-bit floats, a little off the meters they were clamped to.
+      carved && !job.auto && m.dataMinMeters < m.blackMeters - 1e-3 ? 'River beds below the minimum height were flattened to it. Lower the minimum height, or turn on auto-exposure, to keep them.' : null,
       'real ' + realSize(job.bounds) + ' at ' + m.metersPerPixel.toFixed(3) + ' m/px',
       'center ' + m.centerLat.toFixed(6) + ', ' + m.centerLng.toFixed(6),
       'bounds W ' + m.west.toFixed(6) + ' S ' + m.south.toFixed(6) + ' E ' + m.east.toFixed(6) + ' N ' + m.north.toFixed(6),
@@ -1180,7 +1617,7 @@ map = (function () {
   async function buildBiomes(job, report, h, lenient) {
     var waterFromRiver = townLevels(job, h).river;
     h = h || job.heights;
-    var volcanoes = [], volcanoError = null;
+    var volcanoes = [], volcanoError = null, borders = null, borderError = null;
     if (job.climate == 'Tropical') {
       report('Looking up volcanoes...');
       try {
@@ -1188,6 +1625,15 @@ map = (function () {
       } catch (e) {
         if (!lenient) throw e;
         volcanoError = e.message;
+      }
+    }
+    if (job.borders) {
+      report('Looking up state borders...');
+      try {
+        borders = await overpass.borders(job.bounds);
+      } catch (e) {
+        if (!lenient) throw e;
+        borderError = e.message;
       }
     }
     var result = await heightmapExport.renderBiomes({
@@ -1198,11 +1644,16 @@ map = (function () {
       waterLevel: h.water / h.k,
       waterFromRiver: waterFromRiver,
       volcanoes: volcanoes,
+      borders: borders,
+      borderWidth: job.borders,
       northLeft: job.northLeft,
       onStage: report
     });
     result.volcanoCount = volcanoes.length;
     result.volcanoError = volcanoError;
+    result.borderError = borderError;
+    result.bordersWanted = Boolean(job.borders);
+    result.borderWidth = job.borders;
     return result;
   }
 
@@ -1213,8 +1664,11 @@ map = (function () {
         var source = l.key != 'volcano' ? '' : result.volcanoError ? ', left empty because ' + result.volcanoError :
           ' from ' + result.volcanoCount + ' OpenStreetMap volcanoes';
         return l.key + ' ' + (l.share * 100).toFixed(1) + '%' + source;
-      }).join(', ')
-    ];
+      }).join(', '),
+      !result.bordersWanted ? null : result.borderError ? 'state borders left out because ' + result.borderError :
+        result.bordersKm > 0 ? 'state borders drawn as a ' + result.borderWidth + ' m strip of the hills biome along ' + Math.round(result.bordersKm) + ' km' :
+        'no state borders in the box'
+    ].filter(function(line) { return line !== null; });
   }
 
   function biomeFiles(result, name) {
@@ -1229,10 +1683,11 @@ map = (function () {
     var levels = townLevels(job, h);
     // Fetched town sites need the same raising of polders and lowering of water the heightmap gets, planned once for the whole map.
     var plan = null;
+    var canopy = !terrain && job.canopy ? await heightmapExport.canopy(job.bounds, job.out.width, job.out.height, levels.waterline, levels.k, report).catch(function() { return null; }) : null;
     var polders = !terrain && isFinite(levels.waterline) ? await heightmapExport.polders(job.bounds, job.out.width, job.out.height, levels.waterline, levels.k, report, levels.river).catch(function() { return null; }) : null;
     if (job.waterNormalization && !terrain && isFinite(levels.waterline)) {
       var rivers = await riverLines(job, report);
-      plan = await heightmapExport.planWater(job.bounds, job.out.width, job.out.height, levels.k, levels.waterline - SHORE_TOLERANCE, report, rivers.lines, rivers.slack, job.normalizationLift);
+      plan = await heightmapExport.planWater(job.bounds, job.out.width, job.out.height, levels.k, normalizedSurface(levels.waterline, levels.k), report, rivers.rivers, rivers.slack, job.normalizationLift, rivers.cover, canopy);
     }
     var safety = job.towns.safety;
     var reach = safety == 'nudge' || safety == 'force' ? TOWN_NUDGE_REACH : 0;
@@ -1249,7 +1704,8 @@ map = (function () {
       heightScale: levels.k,
       terrainPatch: function(px, py, radius) {
         return heightmapExport.terrainPatch(job.bounds, job.out.width, job.out.height, px, py, radius,
-          {terrain: terrain, smoothing: job.smoothing / GAME_METERS_PER_PIXEL, level: levels.waterline, plan: plan, polders: polders});
+          {terrain: terrain, smoothing: job.smoothing / GAME_METERS_PER_PIXEL, level: levels.waterline, plan: plan, polders: polders,
+            canopy: canopy, relief: reliefFor(job.relief, levels.k, job.mpp), scale: levels.k, lowLand: isFinite(levels.waterline)});
       }
     }, job.towns));
     // Yellow: should grow. Orange: exported but may never grow. Blue: moved so it should grow. Red: skipped.
@@ -1358,7 +1814,8 @@ map = (function () {
       if (towns) files.push({path: 'towns_industries/' + job.name + '.lua', blob: new Blob([towns.lua], {type: 'text/plain'})});
       saveAs(await heightmapExport.zip(files, function(f) { report('Writing ' + zipName + '...', f); }), zipName);
       return {lines: ['Saved ' + zipName + ' for ' + job.climate + '. Extract it into the Transport Fever 3 user folder, %APPDATA%\\Transport Fever 3.']
-        .concat(heightmapSummary(heightmap, job).slice(0, 3), biomeSummary(biomes), towns ? townSummary(towns, job) : ['towns left out because ' + townError]),
+        // The last four lines place the map, which the zip's name already does.
+        .concat(heightmapSummary(heightmap, job).slice(0, -4), biomeSummary(biomes), towns ? townSummary(towns, job) : ['towns left out because ' + townError]),
         game: heightmap.heights};
     }, true);
   }
