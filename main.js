@@ -791,7 +791,8 @@ map = (function () {
         same.waterline = Math.max(same.waterline, line.waterline);
         same.flood = floodShare(same.waterline);
       } else {
-        choices.push({level: line.level, waterline: line.waterline, areaKm2: w.areaKm2, flood: floodShare(line.waterline), sea: w.sea, river: w.river});
+        // ownWaterline stays the largest surface's. Land above it lies under only the shore tolerance of smaller surfaces at the same level.
+        choices.push({level: line.level, waterline: line.waterline, ownWaterline: line.waterline, areaKm2: w.areaKm2, flood: floodShare(line.waterline), sea: w.sea, river: w.river});
       }
     });
     return choices.sort(function(a, b) { return b.areaKm2 - a.areaKm2; });
@@ -859,7 +860,7 @@ map = (function () {
     max = Math.min(GAME_MAX_HEIGHT, Math.max(min + 1, max || Math.ceil(k * a.max)));
     var choice = autoWaterChoice(waterChoices(a.water, k, a.floodShare, carved), a.areaKm2, normalizing);
     return {k: k, min: min, max: max, water: choice ? choice.level : Math.max(GAME_MIN_HEIGHT, min - 1), waterline: choice ? choice.waterline : -Infinity,
-      river: Boolean(choice && choice.river)};
+      ownWaterline: choice ? choice.ownWaterline : -Infinity, river: Boolean(choice && choice.river)};
   }
 
   function readHeights() {
@@ -1036,7 +1037,7 @@ map = (function () {
   async function buildHeightmap(job, report) {
     // The fields only hold the in-game water level. Auto mode takes the waterline from the analysis.
     var h = job.auto && job.analysis ? heightsFor(job.analysis, job.heights.k, job.oceans, fixedMax(job.request), job.waterNormalization) :
-      Object.assign({waterline: job.heights.water / job.heights.k}, job.heights);
+      Object.assign({waterline: job.heights.water / job.heights.k, ownWaterline: job.heights.water / job.heights.k}, job.heights);
     var meta = {heightScale: h.k, waterLevel: h.water, smoothing: job.smoothing};
     var rivers = job.waterNormalization ? await riverLines(job, report) : {lines: null, note: null};
     // A water level under the minimum means the map has no water. Nothing is carved. The level follows the final minimum.
@@ -1073,6 +1074,7 @@ map = (function () {
       submerge: job.oceans && !dry ? submergeFor(h.water, h.waterline, h.k) : null,
       smoothing: job.smoothing / GAME_METERS_PER_PIXEL,
       waterLevel: dry ? -Infinity : h.waterline,
+      raiseAbove: h.ownWaterline,
       waterFromRiver: h.river,
       normalizeWater: job.waterNormalization,
       normalizeLift: job.normalizationLift,
@@ -1229,7 +1231,8 @@ map = (function () {
     var levels = townLevels(job, h);
     // Fetched town sites need the same raising of polders and lowering of water the heightmap gets, planned once for the whole map.
     var plan = null;
-    var polders = !terrain && isFinite(levels.waterline) ? await heightmapExport.polders(job.bounds, job.out.width, job.out.height, levels.waterline, levels.k, report, levels.river).catch(function() { return null; }) : null;
+    var polders = !terrain && isFinite(levels.waterline) ? await heightmapExport.polders(job.bounds, job.out.width, job.out.height, levels.waterline, levels.k, report, levels.river,
+      levels.ownWaterline).catch(function() { return null; }) : null;
     if (job.waterNormalization && !terrain && isFinite(levels.waterline)) {
       var rivers = await riverLines(job, report);
       plan = await heightmapExport.planWater(job.bounds, job.out.width, job.out.height, levels.k, levels.waterline - SHORE_TOLERANCE, report, rivers.lines, rivers.slack, job.normalizationLift);
@@ -1299,7 +1302,8 @@ map = (function () {
   // The height scale, and the real meters at or below which the export makes water. Auto mode takes them from the analysis, since the fields only hold the in-game level.
   function townLevels(job, h) {
     h = h || (job.auto && job.analysis ? heightsFor(job.analysis, job.heights.k, job.oceans, fixedMax(job.request), job.waterNormalization) : job.heights);
-    return {k: h.k, waterline: h.waterline !== undefined ? h.waterline : h.water / h.k, river: Boolean(h.river)};
+    var waterline = h.waterline !== undefined ? h.waterline : h.water / h.k;
+    return {k: h.k, waterline: waterline, ownWaterline: h.ownWaterline !== undefined ? h.ownWaterline : waterline, river: Boolean(h.river)};
   }
 
   function exportRegion() {
