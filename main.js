@@ -1318,7 +1318,7 @@ map = (function () {
       heightScale: levels.k,
       terrainPatch: function(px, py, radius) {
         return heightmapExport.terrainPatch(job.bounds, job.out.width, job.out.height, px, py, radius,
-          {terrain: terrain, smoothing: job.smoothing / GAME_METERS_PER_PIXEL, level: levels.waterline, plan: plan, polders: polders});
+          {terrain: terrain, smoothing: job.smoothing / GAME_METERS_PER_PIXEL, level: levels.waterline, plane: levels.plane, scale: levels.k, plan: plan, polders: polders});
       }
     }, job.towns));
     // Yellow: should grow. Orange: exported but may never grow. Blue: moved so it should grow. Red: skipped.
@@ -1369,7 +1369,7 @@ map = (function () {
   function townLevels(job, h) {
     h = h || (job.auto && job.analysis ? heightsFor(job.analysis, job.heights.k, job.oceans, fixedMax(job.request), job.waterNormalization) : job.heights);
     var waterline = h.waterline !== undefined ? h.waterline : h.water / h.k;
-    return {k: h.k, waterline: waterline, ownWaterline: h.ownWaterline !== undefined ? h.ownWaterline : waterline, river: Boolean(h.river)};
+    return {k: h.k, waterline: waterline, ownWaterline: h.ownWaterline !== undefined ? h.ownWaterline : waterline, river: Boolean(h.river), plane: h.water / h.k};
   }
 
   function exportRegion() {

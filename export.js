@@ -46,6 +46,18 @@ var heightmapExport = (function () {
   const NORMALIZE_SEAM = 200;
   // Real meters a lowered surface may still sit above the level and count as water, for survey steps along a river.
   const NORMALIZE_SURFACE_TOLERANCE = 2;
+  // Real meters for the same near the water's outline. Quays and banks sit a meter or two over their water, which the wider tolerance would drown.
+  const NORMALIZE_EDGE_TOLERANCE = 0.5;
+  // Output pixels from the outline where the edge tolerance applies. Coarse cells span 2 to 8 pixels, and a band that wide would take narrow rivers whole.
+  const NORMALIZE_EDGE_PIXELS = 2;
+  // Pixels of blur that round the water's outline before shapeShores redraws it. One pixel drops stray pixels and one-pixel spurs.
+  const SHORE_BLUR = 1;
+  // Water patches and land specks under this many pixels change sides. They read as noise in game.
+  const MIN_SHORE_PATCH = 16;
+  // In-game meters per pixel of distance from the shoreline for the pixels beside it.
+  const SHORE_SLOPE = 1;
+  // Output pixels shapeShores reaches past a pixel: two blurs, the largest patch it flips and the bed it shapes.
+  const SHORE_REACH = 32;
   // Coarse cells lowered water may reach past the cells land cover gives it, where a cell less than half water still holds the true shore.
   const LOWERED_GROWTH = 0.5;
   // In-game meters land cover's water may grow across the flat water surface it sits on. Land cover's 10 m cells would cut the shore into steps.
@@ -994,6 +1006,117 @@ var heightmapExport = (function () {
     for (let i = 0; i < heights.length; i++) if (heights[i] > level) heights[i] = sum[i] / weight[i];
   }
 
+  // Redraws the shoreline smoothly. The water mask is blurred and cut at one half, which drops stray pixels and spurs, and patches under MIN_SHORE_PATCH pixels change sides.
+  // Pixels beside the new line take the plane plus slope times their distance to it, so the game's interpolated waterline follows the line instead of the pixel steps.
+  // waterline: real meters at or below which a pixel is water. plane: real meters of the game's water level. slope: real meters per pixel.
+  function shapeShores(heights, width, height, waterline, plane, slope) {
+    const n = heights.length, share = new Float32Array(n), was = new Uint8Array(n);
+    for (let i = 0; i < n; i++) share[i] = was[i] = heights[i] <= waterline ? 1 : 0;
+    gaussianBlur(share, width, height, SHORE_BLUR);
+    const water = new Uint8Array(n);
+    for (let i = 0; i < n; i++) water[i] = share[i] >= 0.5 ? 1 : 0;
+    flipSmallPatches(water, width, height, MIN_SHORE_PATCH);
+
+    // A pixel that changed sides takes the mean of its new side's pixels around it, which keeps it from standing out.
+    const flipped = [];
+    for (let i = 0; i < n; i++) if (water[i] !== was[i]) flipped.push(i);
+    const means = flipped.map(i => {
+      const x = i % width, y = (i / width) | 0;
+      let sum = 0, count = 0;
+      for (let v = Math.max(0, y - 3); v <= Math.min(height - 1, y + 3); v++) {
+        for (let u = Math.max(0, x - 3); u <= Math.min(width - 1, x + 3); u++) {
+          const j = v * width + u;
+          if (was[j] === water[i]) {
+            sum += heights[j];
+            count++;
+          }
+        }
+      }
+      return water[i] ? Math.min(count ? sum / count : -Infinity, plane - slope / 2) : Math.max(count ? sum / count : Infinity, plane + slope / 4);
+    });
+    flipped.forEach((i, f) => { heights[i] = means[f]; });
+
+    for (let i = 0; i < n; i++) share[i] = water[i];
+    gaussianBlur(share, width, height, SHORE_BLUR);
+    for (let i = 0; i < n; i++) {
+      if (!(share[i] > 1e-6 && share[i] < 1 - 1e-6)) continue;
+      // A blurred straight edge is a normal distribution's cumulative curve, which gives each pixel's distance to the line, positive on land.
+      let d = -SHORE_BLUR * probit(share[i]);
+      d = water[i] ? Math.min(d, -0.05) : Math.max(d, 0.05);
+      if (d > -1 && d < 1) heights[i] = plane + slope * d;
+      // The bed never rises toward the shore. It is a slope deep 1 to 2 pixels out and fades to its own depth by 4.
+      else if (water[i] && d > -4) heights[i] = Math.min(heights[i], plane - slope * Math.min(1, (4 + d) / 2));
+    }
+  }
+
+  // Flips 4-connected patches of either side smaller than limit pixels. A patch touching the grid's edge may go on past it, so it stays.
+  function flipSmallPatches(mask, width, height, limit) {
+    const seen = new Uint8Array(mask.length), queue = new Int32Array(limit);
+    for (let start = 0; start < mask.length; start++) {
+      if (seen[start]) continue;
+      const side = mask[start];
+      let head = 0, tail = 0, small = true;
+      queue[tail++] = start;
+      seen[start] = 1;
+      while (head < tail && small) {
+        const i = queue[head++], x = i % width;
+        if (x === 0 || x === width - 1 || i < width || i >= mask.length - width) small = false;
+        for (const j of [i - 1, i + 1, i - width, i + width]) {
+          if (!small || j < 0 || j >= mask.length || mask[j] !== side || (j === i - 1 && x === 0) || (j === i + 1 && x === width - 1)) continue;
+          // A seen pixel on this side belongs to a patch already found to be large.
+          if (seen[j]) small = false;
+          else if (tail === limit) small = false;
+          else {
+            seen[j] = 1;
+            queue[tail++] = j;
+          }
+        }
+      }
+      if (small) for (let q = 0; q < tail; q++) mask[queue[q]] = 1 - side;
+    }
+  }
+
+  // A Gaussian blur of sigma pixels, out to four sigma. Pixels past the grid's edge repeat the edge.
+  function gaussianBlur(grid, width, height, sigma) {
+    const r = Math.ceil(4 * sigma), kernel = new Float32Array(2 * r + 1);
+    for (let t = -r; t <= r; t++) kernel[t + r] = Math.exp(-t * t / (2 * sigma * sigma));
+    const total = kernel.reduce((a, b) => a + b, 0);
+    for (let t = 0; t < kernel.length; t++) kernel[t] /= total;
+    const line = new Float32Array(Math.max(width, height));
+    for (let y = 0; y < height; y++) {
+      const row = y * width;
+      for (let x = 0; x < width; x++) line[x] = grid[row + x];
+      for (let x = 0; x < width; x++) {
+        let v = 0;
+        for (let t = -r; t <= r; t++) v += kernel[t + r] * line[Math.min(width - 1, Math.max(0, x + t))];
+        grid[row + x] = v;
+      }
+    }
+    for (let x = 0; x < width; x++) {
+      for (let y = 0; y < height; y++) line[y] = grid[y * width + x];
+      for (let y = 0; y < height; y++) {
+        let v = 0;
+        for (let t = -r; t <= r; t++) v += kernel[t + r] * line[Math.min(height - 1, Math.max(0, y + t))];
+        grid[y * width + x] = v;
+      }
+    }
+  }
+
+  // The inverse of the standard normal distribution's cumulative curve, by Acklam's rational approximation.
+  function probit(p) {
+    const a = [-39.69683028665376, 220.9460984245205, -275.9285104469687, 138.3577518672690, -30.66479806614716, 2.506628277459239];
+    const b = [-54.47609879822406, 161.5858368580409, -155.6989798598866, 66.80131188771972, -13.28068155288572];
+    const c = [-0.007784894002430293, -0.3223964580411365, -2.400758277161838, -2.549732539343734, 4.374664141464968, 2.938163982698783];
+    const d = [0.007784695709041462, 0.3224671290700398, 2.445134137142996, 3.754408661907416];
+    if (p < 0.02425 || p > 0.97575) {
+      const q = Math.sqrt(-2 * Math.log(Math.min(p, 1 - p)));
+      const tail = (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
+      return p < 0.5 ? tail : -tail;
+    }
+    const q = p - 0.5, r = q * q;
+    return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
+  }
+
   // Replaces each cell with the sum over the square of half-width r around it. Columns go in blocks to stay in cache.
   function boxSum(grid, width, height, r, share) {
     const line = new Float64Array(width + 1);
@@ -1352,9 +1475,10 @@ var heightmapExport = (function () {
 
   // Heights in meters for the output pixels within radius of (px, py), as the box lies on the map, a square 2 radius + 1 wide.
   // terrain: the heights render returned for this output, read instead of fetching. smoothing: as for render. level: as render's waterLevel.
+  // plane: real meters of the game's water level. scale: the height scale.
   // plan: a water normalization plan for fetched patches, which render has already applied to terrain.
   async function terrainPatch(bounds, width, height, px, py, radius, options) {
-    const {terrain, smoothing, level, plan, polders} = options;
+    const {terrain, smoothing, level, plane, scale, plan, polders} = options;
     const size = 2 * radius + 1;
     if (terrain) {
       const heights = new Float32Array(size * size);
@@ -1364,8 +1488,9 @@ var heightmapExport = (function () {
       }
       return heights;
     }
-    // The blur reaches this far. A margin this wide makes the smoothed patch match the smoothed map.
-    const pad = smoothing > 0 ? 3 * (boxKernel(smoothing).r + 1) : 0;
+    // The blur and the shore shaping reach this far. A margin this wide makes the patch match the map.
+    const shores = isFinite(level) && isFinite(plane);
+    const pad = (smoothing > 0 ? 3 * (boxKernel(smoothing).r + 1) : 0) + (shores ? SHORE_REACH : 0);
     const full = size + 2 * pad, reach = radius + pad;
     const region = boundsToRegion(bounds), frame = gridFrame(region, width, height);
     const dx = (region.x1 - region.x0) / (width - 1), dy = (region.y1 - region.y0) / (height - 1);
@@ -1377,6 +1502,7 @@ var heightmapExport = (function () {
     if (plan) await applyWaterPlan(plan, heights, full, full, px - reach, py - reach, width, height);
     if (!pad) return heights;
     await smoothLand(heights, full, full, smoothing, level);
+    if (shores) shapeShores(heights, full, full, level, plane, SHORE_SLOPE / scale);
     const out = new Float32Array(size * size);
     for (let j = 0; j < size; j++) out.set(heights.subarray((j + pad) * full + pad, (j + pad) * full + pad + size), j * size);
     return out;
@@ -1730,13 +1856,14 @@ var heightmapExport = (function () {
         const k = j * width + i, before = heights[k];
         heights[k] -= (offset[a] * (1 - fx) + offset[a + 1] * fx) * (1 - fy) + (offset[a + gw] * (1 - fx) + offset[a + gw + 1] * fx) * fy;
         const lineDistance = near ? near.distance[k] / 3 : Infinity, line = lineDistance < 85 ? near.kind[k] : 0;
+        const shore = (outline[a] * (1 - fx) + outline[a + 1] * fx) * (1 - fy) + (outline[a + gw] * (1 - fx) + outline[a + gw + 1] * fx) * fy;
         if (line && lineDistance <= halfWidth && heights[k] <= level + RIVER_LINE_TOLERANCE) {
           heights[k] = level;
           if (line === 2) lifted[k] = 1;
           continue;
-        } else if ((outline[a] * (1 - fx) + outline[a + 1] * fx) * (1 - fy) + (outline[a + gw] * (1 - fx) + outline[a + gw + 1] * fx) * fy >= -LOWERED_GROWTH &&
+        } else if (shore >= -LOWERED_GROWTH &&
           Math.min(heights[k], before - ((lift[a] * (1 - fx) + lift[a + 1] * fx) * (1 - fy) + (lift[a + gw] * (1 - fx) + lift[a + gw + 1] * fx) * fy)) <=
-          level + NORMALIZE_SURFACE_TOLERANCE) {
+          level + (shore < NORMALIZE_EDGE_PIXELS * sx ? NORMALIZE_EDGE_TOLERANCE : NORMALIZE_SURFACE_TOLERANCE)) {
           // The coarse land cover picks out the water. Its full lift draws the shoreline, since the lowering fades from one cell out and would trace the cells' squares.
           heights[k] = level;
           lifted[k] = 1;
@@ -1987,6 +2114,11 @@ var heightmapExport = (function () {
         onStage('Smoothing terrain...', f);
         return yieldToPage();
       });
+    }
+    if (isFinite(waterLevel)) {
+      onStage('Shaping shores...');
+      await yieldToPage();
+      shapeShores(heights, width, height, waterLevel, options.meta.waterLevel / scale, SHORE_SLOPE / scale);
     }
 
     const {lo, hi, capped} = clampAndMeasure(heights, floor, ceiling);
