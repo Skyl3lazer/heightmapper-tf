@@ -54,11 +54,11 @@ The live values come from a coarse preview of the box. If the full-resolution ex
 
 Water levels can only be found where the elevation data stores water as perfectly flat surfaces. Generally this exists for lakes, reservoirs, rivers and the sea.
 
-Elevation data comes from the [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) open dataset (terrarium encoding, zoom 0-15, no API key). The tiles contain a few known bad patches with wrong values, from single pixels to whole tiles of noise. The export replaces them with the next coarser zoom level's data. Neighboring tiles are sometimes built from different surveys. That can leave straight steps along their shared edges. The export also measures those steps and blends them out.
+Elevation data comes from [Mapterhorn](https://mapterhorn.com/) (terrarium encoding, no API key). It uses national elevation surveys where they exist, mostly 1 to 10 m ground models. Everywhere else it uses Copernicus GLO-30 at 30 m. Its tiles store the sea as a flat 0 m. Sea depths come only from NOAA (see include ocean data). Where a zoom level is missing or a tile holds wrong values, the export uses the next coarser zoom level's data. Neighboring tiles are sometimes built from different surveys. That can leave straight steps along their shared edges. The export also measures those steps and blends them out.
 
 ### Data Sources
 
-- [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) - Base elevation map tiles
+- [Mapterhorn](https://mapterhorn.com/attribution/) - Base elevation map tiles
 - [OpenStreetMap](https://www.openstreetmap.org) - Reference map overlay
 - [NOAA DEM Global Mosaic](https://www.ncei.noaa.gov/maps-and-geospatial-products) - Bathymetry (underwater elevations)
 - [Esri / Impact Observatory (Sentinel2)](https://ic.imagery1.arcgis.com/arcgis/rest/services/Sentinel2_10m_LandCover/ImageServer) - Land Usage for biome mapping

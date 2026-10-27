@@ -4,9 +4,13 @@
 var heightmapExport = (function () {
   'use strict';
 
-  const TILE_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
+  const TILE_URL = 'https://tiles.mapterhorn.com/{z}/{x}/{y}.webp';
+  // Mapterhorn's 512 px tile at zoom z covers the four 256 px tiles at zoom z + 1, the grid the export samples.
+  const SOURCE_SIZE = 512;
   const TILE_SIZE = 256;
   const MAX_ZOOM = 15;
+  // Decoded source tiles kept, about 1 MB each, enough for two tile rows of the widest map.
+  const SOURCE_CACHE = 128;
   const EARTH_CIRCUMFERENCE = 40075016.686;
   const FETCH_ATTEMPTS = 4;
   // Real terrain stays inside these meters. Tiles sometimes hold garbage outside them, from a few pixels to a whole tile of noise.
@@ -166,13 +170,55 @@ var heightmapExport = (function () {
     return heights;
   }
 
+  // A missing source tile comes back as NaN, which repairTile fills from the parent.
   async function downloadTile(z, x, y) {
+    const heights = new Float32Array(TILE_SIZE * TILE_SIZE);
+    if (z === 0) {
+      const world = await sourceTile(0, 0, 0);
+      for (let r = 0; r < TILE_SIZE; r++) {
+        for (let c = 0; c < TILE_SIZE; c++) {
+          const p = 2 * (r * SOURCE_SIZE + c);
+          heights[r * TILE_SIZE + c] = (world[p] + world[p + 1] + world[p + SOURCE_SIZE] + world[p + SOURCE_SIZE + 1]) / 4;
+        }
+      }
+      return heights;
+    }
+    const source = await sourceTile(z - 1, x >> 1, y >> 1);
+    if (!source) return heights.fill(NaN);
+    const ox = (x & 1) * TILE_SIZE, oy = (y & 1) * TILE_SIZE;
+    for (let r = 0; r < TILE_SIZE; r++) {
+      const from = (oy + r) * SOURCE_SIZE + ox;
+      heights.set(source.subarray(from, from + TILE_SIZE), r * TILE_SIZE);
+    }
+    return heights;
+  }
+
+  const sourceTiles = new Map();
+
+  // A failed download is dropped, so the next export tries it again.
+  function sourceTile(z, x, y) {
+    const key = z + '/' + x + '/' + y;
+    let tile = sourceTiles.get(key);
+    if (tile) {
+      sourceTiles.delete(key);
+    } else {
+      tile = downloadSource(z, x, y);
+      tile.catch(() => sourceTiles.delete(key));
+    }
+    sourceTiles.set(key, tile);
+    if (sourceTiles.size > SOURCE_CACHE) sourceTiles.delete(sourceTiles.keys().next().value);
+    return tile;
+  }
+
+  // Resolves to null where Mapterhorn has no tile, as above zoom 12 outside national surveys.
+  async function downloadSource(z, x, y) {
     const url = TILE_URL.replace('{z}', z).replace('{x}', x).replace('{y}', y);
     let lastError;
     for (let attempt = 0; attempt < FETCH_ATTEMPTS; attempt++) {
       if (attempt > 0) await sleep(500 * 2 ** attempt);
       try {
         const response = await fetch(url);
+        if (response.status === 404) return null;
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return await decodeTile(await response.blob());
       } catch (e) {
@@ -184,12 +230,12 @@ var heightmapExport = (function () {
 
   async function decodeTile(blob) {
     const bitmap = await createImageBitmap(blob, {colorSpaceConversion: 'none', premultiplyAlpha: 'none'});
-    const canvas = new OffscreenCanvas(TILE_SIZE, TILE_SIZE);
+    const canvas = new OffscreenCanvas(SOURCE_SIZE, SOURCE_SIZE);
     const ctx = canvas.getContext('2d', {willReadFrequently: true});
     ctx.drawImage(bitmap, 0, 0);
     bitmap.close();
-    const rgba = ctx.getImageData(0, 0, TILE_SIZE, TILE_SIZE).data;
-    const heights = new Float32Array(TILE_SIZE * TILE_SIZE);
+    const rgba = ctx.getImageData(0, 0, SOURCE_SIZE, SOURCE_SIZE).data;
+    const heights = new Float32Array(SOURCE_SIZE * SOURCE_SIZE);
     for (let i = 0; i < heights.length; i++) {
       heights[i] = rgba[i * 4] * 256 + rgba[i * 4 + 1] + rgba[i * 4 + 2] / 256 - 32768;
     }

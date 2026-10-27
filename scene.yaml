@@ -1,9 +1,10 @@
 sources:
     elevation:
         type: Raster
-        url: https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png
-        max_zoom: 15
-        tile_size: 256
+        url: https://tiles.mapterhorn.com/{z}/{x}/{y}.webp
+        # The highest zoom Mapterhorn has everywhere. Past it Tangram scales these tiles up instead of leaving holes.
+        max_zoom: 12
+        tile_size: 512
 styles:
     hillshade:
         base: raster

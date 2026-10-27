@@ -102,7 +102,7 @@ map = (function () {
   
   var layer = Tangram.leafletLayer({
     scene: 'scene.yaml',
-    attribution: 'Map by <a href="https://mapzen.com/tangram" target="_blank">Tangram</a>, for TF by <a href="https://linktr.ee/skyl3lazer" target="_blank">Skyl3lazer</a> | <a href="https://github.com/tangrams/heightmapper" target="_blank">Fork This</a>'
+    attribution: 'Map by <a href="https://mapzen.com/tangram" target="_blank">Tangram</a>, elevation <a href="https://mapterhorn.com/attribution" target="_blank">&copy; Mapterhorn</a>, for TF by <a href="https://linktr.ee/skyl3lazer" target="_blank">Skyl3lazer</a> | <a href="https://github.com/tangrams/heightmapper" target="_blank">Fork This</a>'
   });
   
   function debounce(func, wait, immediate) {
