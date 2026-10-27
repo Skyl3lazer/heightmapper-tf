@@ -20,6 +20,8 @@ var heightmapExport = (function () {
   const PREVIEW_SIZE = 1024;
   const FLAT_TOLERANCE = 0.02;
   const MIN_WATER_CELLS = 25;
+  // Share of a flat surface's mapped cells that land cover must call water. Flat dry land, like salt flats and the terraces of rounded tile heights, stays out.
+  const WATER_COVER_SHARE = 0.5;
   // Share of land cover's water cells below the height taken as the lowest water, so a few misread cells can't set it.
   const LOWEST_WATER_SHARE = 0.01;
   const WATER_MERGE_METERS = 0.5;
@@ -689,6 +691,18 @@ var heightmapExport = (function () {
       }
     }
 
+    // A surface without land cover data passes, as over open ocean or when the lookup failed.
+    const mostlyWater = (cells, count) => {
+      let mapped = 0, water = 0;
+      for (let q = 0; q < count; q++) {
+        const c = cover ? cover[cells[q]] : LC_NO_DATA;
+        if (c === LC_NO_DATA || c === LC_CLOUDS) continue;
+        mapped++;
+        if (c === LC_WATER) water++;
+      }
+      return !mapped || water >= WATER_COVER_SHARE * mapped;
+    };
+
     const surfaces = [];
     const queue = new Int32Array(heights.length);
     const claimed = new Uint8Array(heights.length);
@@ -710,8 +724,9 @@ var heightmapExport = (function () {
           }
         }
       }
-      if (tail >= MIN_WATER_CELLS) {
-        surfaces.push({level: sum / tail, top: top, area: area});
+      if (tail >= MIN_WATER_CELLS && mostlyWater(queue, tail)) {
+        // Mapterhorn stores the sea as a flat surface at or near 0 m.
+        surfaces.push({level: sum / tail, top: top, area: area, sea: Math.abs(sum / tail) <= WATER_MERGE_METERS});
         for (let q = 0; q < tail; q++) claimed[queue[q]] = 1;
       }
     }
@@ -719,7 +734,7 @@ var heightmapExport = (function () {
     // Land cover keeps dry land below sea level from counting as water. It has no data over open ocean, where height decides.
     const isWater = i => cover && cover[i] !== LC_NO_DATA && cover[i] !== LC_CLOUDS ? cover[i] === LC_WATER : heights[i] <= 0;
 
-    // Open sea has real depth. It never shows up as a flat surface. Other water at or below sea level counts as sea.
+    // Water at or below sea level counts as sea even where it isn't flat, as along a shore.
     let seaCells = 0, seaArea = 0;
     for (let i = 0; i < heights.length; i++) {
       if (heights[i] <= 0 && !claimed[i] && isWater(i)) {
