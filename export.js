@@ -22,6 +22,8 @@ var heightmapExport = (function () {
   const MIN_WATER_CELLS = 25;
   // Share of a flat surface's mapped cells that land cover must call water. Flat dry land, like salt flats and the terraces of rounded tile heights, stays out.
   const WATER_COVER_SHARE = 0.5;
+  // Real meters above sea level tidal water can be surveyed at, caught between the tides. Water this low that runs off the map joins the sea.
+  const TIDAL_HEIGHT = 4;
   // Share of land cover's water cells below the height taken as the lowest water, so a few misread cells can't set it.
   const LOWEST_WATER_SHARE = 0.01;
   const WATER_MERGE_METERS = 0.5;
@@ -709,7 +711,7 @@ var heightmapExport = (function () {
     for (let start = 0; start < heights.length; start++) {
       if (!flat[start]) continue;
       flat[start] = 0;
-      let head = 0, tail = 0, sum = 0, top = -Infinity, area = 0;
+      let head = 0, tail = 0, sum = 0, top = -Infinity, area = 0, edge = false;
       queue[tail++] = start;
       while (head < tail) {
         const i = queue[head++];
@@ -717,6 +719,7 @@ var heightmapExport = (function () {
         area += areas[(i / width) | 0];
         top = Math.max(top, heights[i]);
         const x = i % width;
+        edge = edge || x === 0 || x === width - 1 || i < width || i >= heights.length - width;
         for (const j of [x > 0 ? i - 1 : -1, x < width - 1 ? i + 1 : -1, i - width, i + width]) {
           if (j >= 0 && j < heights.length && flat[j] && level(i, j)) {
             flat[j] = 0;
@@ -725,8 +728,11 @@ var heightmapExport = (function () {
         }
       }
       if (tail >= MIN_WATER_CELLS && mostlyWater(queue, tail)) {
+        const mean = sum / tail;
+        // Tidal water is sea surveyed between the tides. Land cover has to vouch for it, since a flat field can run off the map too.
+        const tidal = Boolean(cover) && edge && mean > WATER_MERGE_METERS && mean <= TIDAL_HEIGHT;
         // Mapterhorn stores the sea as a flat surface at or near 0 m.
-        surfaces.push({level: sum / tail, top: top, area: area, sea: Math.abs(sum / tail) <= WATER_MERGE_METERS});
+        surfaces.push({level: mean, top: top, area: area, sea: tidal || Math.abs(mean) <= WATER_MERGE_METERS, tidal: tidal});
         for (let q = 0; q < tail; q++) claimed[queue[q]] = 1;
       }
     }
@@ -752,8 +758,9 @@ var heightmapExport = (function () {
         last.top = Math.max(last.top, surface.top);
         last.area += surface.area;
         last.sea = last.sea || surface.sea;
+        last.tidal = last.tidal || surface.tidal;
       } else {
-        merged.push({base: surface.level, top: surface.top, area: surface.area, sea: surface.sea});
+        merged.push({base: surface.level, top: surface.top, area: surface.area, sea: surface.sea, tidal: surface.tidal});
       }
     }
     // On a map without sea, the lowest water land cover sees outside flat lakes, like a river leaving the map, can set the level for water normalization to lower the rest onto.
@@ -787,7 +794,7 @@ var heightmapExport = (function () {
     }
     return {
       surfaces: merged
-        .map(m => ({level: m.base, top: m.top, areaKm2: m.area / 1e6, sea: Boolean(m.sea), river: Boolean(m.river)}))
+        .map(m => ({level: m.base, top: m.top, areaKm2: m.area / 1e6, sea: Boolean(m.sea), river: Boolean(m.river), tidal: Boolean(m.tidal)}))
         .sort((a, b) => b.areaKm2 - a.areaKm2),
       floodShare: floodShare
     };

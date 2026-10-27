@@ -692,7 +692,7 @@ map = (function () {
   function suggestedWaterLevel() {
     var k = Number(gui.heightScale);
     if (!analysis || !(k > 0)) return null;
-    var choice = autoWaterChoice(waterChoices(analysis.water, k, analysis.floodShare, gui.include_oceans), analysis.areaKm2, gui.waterNormalization);
+    var choice = autoWaterChoice(waterChoices(analysis.water, k, analysis.floodShare, gui.include_oceans, gui.waterNormalization), analysis.areaKm2, gui.waterNormalization);
     return choice ? choice.level : null;
   }
 
@@ -817,7 +817,7 @@ map = (function () {
     if (!gui.include_oceans) return null;
     var k = heightScale();
     if (!gui.autoexpose) return submergeFor(Number(gui.waterLevel), Number(gui.waterLevel) / k, k);
-    var choice = autoWaterChoice(waterChoices(water, k, floodShare, true), areaKm2, gui.waterNormalization);
+    var choice = autoWaterChoice(waterChoices(water, k, floodShare, true, gui.waterNormalization), areaKm2, gui.waterNormalization);
     return choice ? submergeFor(choice.level, choice.waterline, k) : null;
   }
 
@@ -825,7 +825,7 @@ map = (function () {
   function previewWaterSurface(water, floodShare, areaKm2) {
     var k = heightScale();
     if (!gui.autoexpose) return Number(gui.waterLevel) / k - SHORE_TOLERANCE;
-    var choice = autoWaterChoice(waterChoices(water, k, floodShare, gui.include_oceans), areaKm2, true);
+    var choice = autoWaterChoice(waterChoices(water, k, floodShare, gui.include_oceans, true), areaKm2, true);
     return choice ? choice.waterline - SHORE_TOLERANCE : null;
   }
 
@@ -838,10 +838,11 @@ map = (function () {
   }
 
   // In-game water levels with their total surface area and the share of the map's dry land each would drown, largest first.
-  function waterChoices(water, k, floodShare, carved) {
+  // normalizing: tidal water joins the sea at 0 m for normalization to lower. Without it, tidal water is sea at its own height and the land below it is raised.
+  function waterChoices(water, k, floodShare, carved, normalizing) {
     var choices = [];
     water.forEach(function(w) {
-      var line = waterLineFor(w, k, carved);
+      var line = waterLineFor(w.tidal && normalizing ? {top: 0} : w, k, carved);
       var same = choices.filter(function(c) { return c.level == line.level; })[0];
       if (same) {
         same.areaKm2 += w.areaKm2;
@@ -865,7 +866,7 @@ map = (function () {
       setBoxWater(e.message);
       return;
     }
-    var choices = waterChoices(analysis.water, k, analysis.floodShare, gui.include_oceans);
+    var choices = waterChoices(analysis.water, k, analysis.floodShare, gui.include_oceans, gui.waterNormalization);
     // The lowest river water is only worth showing when no other level qualifies.
     var leveled = autoWaterChoice(choices.filter(function(c) { return !c.river; }), analysis.areaKm2, false);
     var shown = choices.filter(function(c) { return c.river ? !leveled : c === leveled || c === choices[0] || c.areaKm2 >= 0.1; });
@@ -917,7 +918,7 @@ map = (function () {
   function heightsFor(a, k, carved, max, normalizing) {
     var min = Math.max(GAME_MIN_HEIGHT, Math.floor(k * a.min));
     max = Math.min(GAME_MAX_HEIGHT, Math.max(min + 1, max || Math.ceil(k * a.max)));
-    var choice = autoWaterChoice(waterChoices(a.water, k, a.floodShare, carved), a.areaKm2, normalizing);
+    var choice = autoWaterChoice(waterChoices(a.water, k, a.floodShare, carved, normalizing), a.areaKm2, normalizing);
     return {k: k, min: min, max: max, water: choice ? choice.level : Math.max(GAME_MIN_HEIGHT, min - 1), waterline: choice ? choice.waterline : -Infinity,
       ownWaterline: choice ? choice.ownWaterline : -Infinity, river: Boolean(choice && choice.river)};
   }
