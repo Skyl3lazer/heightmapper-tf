@@ -167,15 +167,14 @@ var townExport = (function () {
   }
 
   async function build(options) {
-    // terrainPatch(px, py, radius): resolves to the real heights in meters of the output pixels within radius of (px, py), north up.
+    // terrainPatch(px, py, radius): resolves to the real heights in meters of the output pixels within radius of (px, py), as the box lies on the map.
     // waterline: real meters at or below which the map is water. heightScale: in-game meters per real meter.
     // reach: whole in-game meters a town may move to a position whose street can be built. overLand: the move may not cross water.
     // keepUnsafe: a town with no such position stays where it is instead of being skipped.
     const {bounds, width, height, maxTowns, minSpacing, includeVillages, originalNames, northLeft, terrainPatch, waterline, heightScale, overLand, keepUnsafe} = options;
     const reach = options.reach || 0;
     const onStage = options.onStage || function () {};
-    const nw = heightmapExport.project(bounds.north, bounds.west);
-    const se = heightmapExport.project(bounds.south, bounds.east);
+    const grid = heightmapExport.grid(bounds, width, height), area = heightmapExport.enclosing(bounds);
     const halfX = (width - 1) / 2 * GAME_METERS_PER_PIXEL;
     const halfY = (height - 1) / 2 * GAME_METERS_PER_PIXEL;
     const moves = [];
@@ -184,7 +183,7 @@ var townExport = (function () {
     }
     moves.sort((a, b) => a[0] * a[0] + a[1] * a[1] - b[0] * b[0] - b[1] * b[1]);
 
-    // Moves and street angles are in the game's frame, which a landscape export turns against the patch's east and north.
+    // Moves and street angles are in the game's frame, which a landscape export turns a quarter against the patch.
     const turn = (dx, dy) => northLeft ? [dy, -dx] : [dx, dy];
     function problemsAt(tester, c, dx, dy) {
       const [u, v] = turn(dx, dy), angle = streetAngle(c.x + dx, c.y + dy);
@@ -213,31 +212,31 @@ var townExport = (function () {
         if (Math.abs(east + u) > halfX - EDGE_MARGIN || Math.abs(north + v) > halfY - EDGE_MARGIN) continue;
         if ((!dx && !dy) || (connected && !connected(u, v)) || problemsAt(tester, c, dx, dy).length) continue;
         const px = c.px + u / GAME_METERS_PER_PIXEL, py = c.py - v / GAME_METERS_PER_PIXEL;
-        const p = heightmapExport.unproject(nw.x + px / (width - 1) * (se.x - nw.x), nw.y + py / (height - 1) * (se.y - nw.y));
+        const p = grid.toLatLng(px, py);
         return Object.assign({}, c, {x: c.x + dx, y: c.y + dy, px: px, py: py, lat: p.lat, lng: p.lng, from: c, moved: Math.hypot(dx, dy)});
       }
       return null;
     }
 
     const centerLng = (bounds.west + bounds.east) / 2;
-    // Game position of a point, east and north of the map center before a landscape export turns it.
+    // Game position of a point, right of and above the map center before a landscape export turns it.
     function position(lat, lon) {
-      const p = heightmapExport.project(lat, lon);
-      const x = snap(((p.x - nw.x) / (se.x - nw.x) - 0.5) * 2 * halfX);
-      const y = snap((0.5 - (p.y - nw.y) / (se.y - nw.y)) * 2 * halfY);
+      const p = grid.toPixel(lat, lon);
+      const x = snap((p.x - (width - 1) / 2) * GAME_METERS_PER_PIXEL);
+      const y = snap(((height - 1) / 2 - p.y) * GAME_METERS_PER_PIXEL);
       return Math.abs(x) > halfX - EDGE_MARGIN || Math.abs(y) > halfY - EDGE_MARGIN ? null : {x: x, y: y};
     }
     // Places of one type, looked up in tiles of at most maxKm2 so no lookup runs into Overpass's time limit. report(fraction): called as tiles finish.
     async function lookUp(tag, maxKm2, report) {
-      const areaKm2 = heightmapExport.groundWidth(bounds) * heightmapExport.groundHeight(bounds) / 1e6;
-      const count = Math.max(1, Math.ceil(areaKm2 / maxKm2)), aspect = heightmapExport.groundWidth(bounds) / heightmapExport.groundHeight(bounds);
+      const areaKm2 = heightmapExport.groundWidth(area) * heightmapExport.groundHeight(area) / 1e6;
+      const count = Math.max(1, Math.ceil(areaKm2 / maxKm2)), aspect = heightmapExport.groundWidth(area) / heightmapExport.groundHeight(area);
       const cols = Math.max(1, Math.round(Math.sqrt(count * aspect))), rows = Math.ceil(count / cols);
       const tiles = [];
       for (let r = 0; r < rows; r++) {
         for (let c = 0; c < cols; c++) {
           const tile = {
-            north: bounds.north + (bounds.south - bounds.north) * r / rows, south: bounds.north + (bounds.south - bounds.north) * (r + 1) / rows,
-            west: bounds.west + (bounds.east - bounds.west) * c / cols, east: bounds.west + (bounds.east - bounds.west) * (c + 1) / cols, room: 0
+            north: area.north + (area.south - area.north) * r / rows, south: area.north + (area.south - area.north) * (r + 1) / rows,
+            west: area.west + (area.east - area.west) * c / cols, east: area.west + (area.east - area.west) * (c + 1) / cols, room: 0
           };
           for (let j = 0; j <= TOWN_TILE_SAMPLES; j++) {
             for (let i = 0; i <= TOWN_TILE_SAMPLES; i++) {
@@ -253,7 +252,7 @@ var townExport = (function () {
       const chosen = tiles.slice(0, MAX_TOWN_TILES), places = new Map();
       for (const [n, tile] of chosen.entries()) {
         if (chosen.length > 1) report(n / chosen.length);
-        for (const place of await overpass.nodes(rows * cols > 1 ? tile : bounds, `["place"="${tag}"]`)) places.set(place.id, place);
+        for (const place of await overpass.nodes(rows * cols > 1 ? tile : area, `["place"="${tag}"]`)) places.set(place.id, place);
       }
       return {places: [...places.values()], left: tiles.length - chosen.length};
     }

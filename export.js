@@ -264,6 +264,7 @@ var heightmapExport = (function () {
   // Filters the source so every output pixel is smoothed alike. Point or box sampling near whole ratios leaves bands.
   // Samples sit on a grid whose first and last pixels are on the region edges.
   async function sampleRegion(region, width, height, zoom, onProgress) {
+    if (region.angle) return sampleTurned(region, width, height, zoom, onProgress);
     const scale = TILE_SIZE * 2 ** zoom;
     const cols = footprints(region.x0, region.x1, width, scale, true);
     const rows = footprints(region.y0, region.y1, height, scale);
@@ -329,6 +330,113 @@ var heightmapExport = (function () {
       }
     }
     return out;
+  }
+
+  // sampleRegion for a turned region, whose samples lie across the source rows. Each takes the tent filter in both directions at once.
+  // Each tile row is fetched only as wide as the region reaches across it.
+  async function sampleTurned(region, width, height, zoom, onProgress) {
+    const scale = TILE_SIZE * 2 ** zoom, lastRow = 2 ** zoom - 1, frame = gridFrame(region, width, height);
+    const ox = frame.ox * scale, oy = frame.oy * scale, ux = frame.ux * scale, uy = frame.uy * scale, vx = frame.vx * scale, vy = frame.vy * scale;
+    const radius = Math.max(Math.hypot(ux, uy), Math.hypot(vx, vy), 1);
+    const corners = [[ox, oy], [ox + (width - 1) * ux, oy + (width - 1) * uy],
+      [ox + (width - 1) * ux + (height - 1) * vx, oy + (width - 1) * uy + (height - 1) * vy], [ox + (height - 1) * vx, oy + (height - 1) * vy]];
+    const band0 = Math.min(lastRow, Math.max(0, Math.floor(Math.min(...corners.map(c => c[1])) / TILE_SIZE)));
+    const band1 = Math.min(lastRow, Math.max(0, Math.floor(Math.max(...corners.map(c => c[1])) / TILE_SIZE)));
+    const reach = Math.ceil(radius / TILE_SIZE);
+    // A tile row also takes the tiles whose seams with it are healed within a sample's reach, so every sample sees the same healing.
+    const margin = radius + SEAM_FEATHER + 1, ranges = new Map();
+    for (let ty = Math.max(0, band0 - reach); ty <= Math.min(lastRow, band1 + reach); ty++) {
+      const span = spanBetween(corners, ty * TILE_SIZE - margin, (ty + 1) * TILE_SIZE + margin);
+      if (span) ranges.set(ty, [Math.floor((span[0] - margin) / TILE_SIZE), Math.floor((span[1] + margin) / TILE_SIZE)]);
+    }
+
+    const strips = new Map();
+    let stripsDone = 0;
+    function strip(ty) {
+      if (!ranges.has(ty)) return Promise.resolve(null);
+      if (!strips.has(ty)) {
+        const [tx0, tx1] = ranges.get(ty);
+        strips.set(ty, fetchStrip(zoom, ty, tx0, tx1).then(data => {
+          onProgress(++stripsDone / ranges.size);
+          return {data: data, width: (tx1 - tx0 + 1) * TILE_SIZE, offset: tx0 * TILE_SIZE};
+        }));
+      }
+      return strips.get(ty);
+    }
+
+    const healed = new Set();
+    async function healBelow(ty) {
+      if (healed.has(ty)) return;
+      healed.add(ty);
+      const upper = await strip(ty), lower = await strip(ty + 1);
+      if (!upper || !lower) return;
+      const from = Math.max(upper.offset, lower.offset), to = Math.min(upper.offset + upper.width, lower.offset + lower.width);
+      if (to > from) {
+        healSeam(upper.data, (x, k) => (TILE_SIZE - 1 - k) * upper.width + from - upper.offset + x, lower.data, (x, k) => k * lower.width + from - lower.offset + x, to - from);
+      }
+    }
+
+    // Each sample is computed with the band of tile rows its center falls in.
+    const out = new Float32Array(width * height), across = new Float64Array(Math.ceil(2 * radius) + 2);
+    const bandOf = y => Math.min(band1, Math.max(band0, Math.floor(y / TILE_SIZE)));
+    for (let band = band0; band <= band1; band++) {
+      for (const old of strips.keys()) if (old < band - reach) strips.delete(old);
+      strip(band + reach + 1);
+      for (let ty = band - reach; ty < band + reach; ty++) await healBelow(ty);
+      const rows = [];
+      for (let ty = band - reach; ty <= band + reach; ty++) rows.push(await strip(ty));
+      const top = band === band0 ? -Infinity : band * TILE_SIZE, bottom = band === band1 ? Infinity : (band + 1) * TILE_SIZE;
+      for (let j = 0; j < height; j++) {
+        const rowX = ox + j * vx, rowY = oy + j * vy;
+        let i0 = 0, i1 = width - 1;
+        if (uy) {
+          const a = (top - rowY) / uy, b = (bottom - rowY) / uy;
+          i0 = Math.max(0, Math.floor(Math.min(a, b)) - 1);
+          i1 = Math.min(width - 1, Math.ceil(Math.max(a, b)) + 1);
+        }
+        for (let i = i0; i <= i1; i++) {
+          const cx = rowX + i * ux, cy = rowY + i * uy;
+          if (bandOf(cy) !== band) continue;
+          const c0 = Math.ceil(cx - radius - 0.5), taps = Math.floor(cx + radius - 0.5) - c0 + 1;
+          let acrossSum = 0;
+          for (let t = 0; t < taps; t++) acrossSum += across[t] = Math.max(0, 1 - Math.abs(c0 + t + 0.5 - cx) / radius);
+          const r1 = Math.min(scale - 1, Math.floor(cy + radius - 0.5));
+          let sum = 0, total = 0;
+          for (let r = Math.max(0, Math.ceil(cy - radius - 0.5)); r <= r1; r++) {
+            const w = 1 - Math.abs(r + 0.5 - cy) / radius;
+            if (w <= 0) continue;
+            const s = rows[Math.floor(r / TILE_SIZE) - band + reach], start = (r % TILE_SIZE) * s.width + c0 - s.offset;
+            let v = 0;
+            for (let t = 0; t < taps; t++) v += across[t] * s.data[start + t];
+            sum += w * v;
+            total += w * acrossSum;
+          }
+          out[j * width + i] = sum / total;
+        }
+      }
+      await yieldToPage();
+    }
+    return out;
+  }
+
+  // The x extent of the part of a convex polygon between y = lo and y = hi, or null where it has none.
+  function spanBetween(points, lo, hi) {
+    let min = Infinity, max = -Infinity;
+    points.forEach(([x, y], n) => {
+      if (y >= lo && y <= hi) {
+        min = Math.min(min, x);
+        max = Math.max(max, x);
+      }
+      const [x2, y2] = points[(n + 1) % points.length];
+      for (const edge of [lo, hi]) {
+        if ((y - edge) * (y2 - edge) < 0) {
+          const at = x + (edge - y) / (y2 - y) * (x2 - x);
+          min = Math.min(min, at);
+          max = Math.max(max, at);
+        }
+      }
+    });
+    return min <= max ? [min, max] : null;
   }
 
   const CRC_TABLE = (function () {
@@ -464,8 +572,33 @@ var heightmapExport = (function () {
     return new Blob(parts, {type: 'image/png'});
   }
 
+  // bounds.rotation: degrees the box turns clockwise around its center.
   function boundsToRegion(bounds) {
-    return {x0: lngToX(bounds.west), x1: lngToX(bounds.east), y0: latToY(bounds.north), y1: latToY(bounds.south)};
+    return {x0: lngToX(bounds.west), x1: lngToX(bounds.east), y0: latToY(bounds.north), y1: latToY(bounds.south), angle: (bounds.rotation || 0) * Math.PI / 180};
+  }
+
+  // Pixel (i, j) of a width x height grid over the region sits at Mercator (ox + i ux + j vx, oy + i uy + j vy). The grid turns with the region.
+  function gridFrame(region, width, height) {
+    const cos = Math.cos(region.angle), sin = Math.sin(region.angle);
+    const dx = (region.x1 - region.x0) / (width - 1), dy = (region.y1 - region.y0) / (height - 1);
+    const a = (region.x0 - region.x1) / 2, b = (region.y0 - region.y1) / 2;
+    return {
+      ox: (region.x0 + region.x1) / 2 + a * cos - b * sin, oy: (region.y0 + region.y1) / 2 + a * sin + b * cos,
+      ux: dx * cos, uy: dx * sin, vx: -dy * sin, vy: dy * cos
+    };
+  }
+
+  function toGrid(frame, x, y) {
+    const det = frame.ux * frame.vy - frame.uy * frame.vx, rx = x - frame.ox, ry = y - frame.oy;
+    return {x: (rx * frame.vy - ry * frame.vx) / det, y: (ry * frame.ux - rx * frame.uy) / det};
+  }
+
+  // The north-up region covering a turned one.
+  function enclosingRegion(region) {
+    const cos = Math.abs(Math.cos(region.angle)), sin = Math.abs(Math.sin(region.angle));
+    const cx = (region.x0 + region.x1) / 2, cy = (region.y0 + region.y1) / 2, w = (region.x1 - region.x0) / 2, h = (region.y1 - region.y0) / 2;
+    const ex = w * cos + h * sin, ey = w * sin + h * cos;
+    return {x0: cx - ex, x1: cx + ex, y0: cy - ey, y1: cy + ey, angle: 0};
   }
 
   // Ground meters across the region, measured at its center latitude.
@@ -477,6 +610,16 @@ var heightmapExport = (function () {
   // Real m2 of one cell in each row of a grid over the region. Web Mercator stretches the ground away from the equator. Cells near the poles cover less.
   function rowAreas(region, width, height) {
     const equator = (region.x1 - region.x0) * EARTH_CIRCUMFERENCE / (width - 1), areas = new Float64Array(height);
+    if (region.angle) {
+      // A turned row crosses latitudes. It takes its mean cell area. cos(lat) is 1 / cosh(PI (1 - 2y)), whose square integrates to a tanh.
+      const frame = gridFrame(region, width, height);
+      for (let y = 0; y < height; y++) {
+        const a = frame.oy + y * frame.vy, b = a + (width - 1) * frame.uy;
+        areas[y] = equator ** 2 * (Math.abs(b - a) < 1e-9 ? Math.cosh(Math.PI * (1 - 2 * a)) ** -2 :
+          (Math.tanh(Math.PI * (1 - 2 * a)) - Math.tanh(Math.PI * (1 - 2 * b))) / (2 * Math.PI * (b - a)));
+      }
+      return areas;
+    }
     for (let y = 0; y < height; y++) {
       areas[y] = (equator * Math.cos(yToLat(region.y0 + y / (height - 1) * (region.y1 - region.y0)) * Math.PI / 180)) ** 2;
     }
@@ -592,6 +735,7 @@ var heightmapExport = (function () {
   // ArcGIS image services return no data past the antimeridian. A box crossing it is fetched in pieces, each shifted back into the world.
   // onProgress(fraction): called as the image downloads. The server's own preparation time can't be measured.
   async function fetchImageServer(url, region, width, height, pixelType, interpolation, onProgress) {
+    if (region.angle) return fetchTurned(url, region, width, height, pixelType, interpolation, onProgress);
     const out = new (pixelType === 'F32' ? Float32Array : Uint8Array)(width * height);
     const cell = (region.x1 - region.x0) / (width - 1);
     for (let c = 0; c < width;) {
@@ -635,6 +779,42 @@ var heightmapExport = (function () {
     }
     if (received < expected) throw new Error('short response');
     return floats ? new Float32Array(bytes.buffer) : bytes;
+  }
+
+  // Image services only serve north-up images. A turned region is read off the north-up one around it, at its own cell size up to RASTER_MAX_SIZE across.
+  // Classes take the nearest cell. Depths blend only real values, since the no-data marker would drag its neighbors down.
+  async function fetchTurned(url, region, width, height, pixelType, interpolation, onProgress) {
+    const outer = enclosingRegion(region);
+    const cell = Math.max((region.x1 - region.x0) / (width - 1), (outer.x1 - outer.x0) / (RASTER_MAX_SIZE - 1), (outer.y1 - outer.y0) / (RASTER_MAX_SIZE - 1));
+    const ow = Math.ceil((outer.x1 - outer.x0) / cell) + 1, oh = Math.ceil((outer.y1 - outer.y0) / cell) + 1;
+    const grid = {x0: outer.x0, x1: outer.x0 + (ow - 1) * cell, y0: outer.y0, y1: outer.y0 + (oh - 1) * cell, angle: 0};
+    const source = await fetchImageServer(url, grid, ow, oh, pixelType, interpolation, onProgress);
+    const frame = gridFrame(region, width, height), out = new source.constructor(width * height);
+    let sum, weight;
+    const blend = (k, w) => {
+      if (plausible(source[k])) {
+        sum += w * source[k];
+        weight += w;
+      }
+    };
+    for (let j = 0; j < height; j++) {
+      for (let i = 0; i < width; i++) {
+        const u = Math.min(ow - 1, Math.max(0, (frame.ox + i * frame.ux + j * frame.vx - grid.x0) / cell));
+        const v = Math.min(oh - 1, Math.max(0, (frame.oy + i * frame.uy + j * frame.vy - grid.y0) / cell));
+        if (pixelType !== 'F32') {
+          out[j * width + i] = source[Math.round(v) * ow + Math.round(u)];
+          continue;
+        }
+        const c = Math.min(Math.floor(u), ow - 2), r = Math.min(Math.floor(v), oh - 2), fx = u - c, fy = v - r, a = r * ow + c;
+        sum = weight = 0;
+        blend(a, (1 - fx) * (1 - fy));
+        blend(a + 1, fx * (1 - fy));
+        blend(a + ow, (1 - fx) * fy);
+        blend(a + ow + 1, fx * fy);
+        out[j * width + i] = weight > 0 ? sum / weight : source[a];
+      }
+    }
+    return out;
   }
 
   function rasterSize(width, height) {
@@ -837,7 +1017,7 @@ var heightmapExport = (function () {
 
   // Biome map plus the climate's layer masks for Transport Fever 3's biome import.
   // waterLevel: real meters at or below which the map is water. waterFromRiver: as for render. volcanoes: OpenStreetMap volcano nodes, {lat, lon}.
-  // width and height are the region's, north up. northLeft turns every image a quarter left.
+  // width and height are the region's, as the box lies on the map. northLeft turns every image a quarter left.
   async function renderBiomes(options) {
     const {bounds, width, height, climate, waterLevel, waterFromRiver, volcanoes, northLeft} = options;
     const onStage = options.onStage || function () {};
@@ -965,16 +1145,15 @@ var heightmapExport = (function () {
         }
       }
     }
-    const centerLng = xToLng((region.x0 + region.x1) / 2);
+    const centerLng = xToLng((region.x0 + region.x1) / 2), frame = gridFrame(region, width, height);
     volcanoes.forEach((v, n) => {
       const id = n + 1;
       // OpenStreetMap longitudes stay within -180 to 180. They move to the copy of the world the box is in.
       const lon = v.lon + 360 * Math.round((centerLng - v.lon) / 360);
       // Growth starts at the highest land near the point, since OpenStreetMap points often sit on a flank or the crater floor.
       let top = -1;
-      within((lngToX(lon) - region.x0) / (region.x1 - region.x0) * (width - 1),
-        (latToY(v.lat) - region.y0) / (region.y1 - region.y0) * (height - 1),
-        SUMMIT_SEARCH_RADIUS / spacing, i => { if (top < 0 || heights[i] > heights[top]) top = i; });
+      const at = toGrid(frame, lngToX(lon), latToY(v.lat));
+      within(at.x, at.y, SUMMIT_SEARCH_RADIUS / spacing, i => { if (top < 0 || heights[i] > heights[top]) top = i; });
       if (top < 0) return;
       const cx = top % width, cy = (top - cx) / width;
       let head = 0, tail = 0;
@@ -1100,7 +1279,7 @@ var heightmapExport = (function () {
     return labels.map(l => l && !edge[l] ? 1 : 0);
   }
 
-  // Heights in meters for the output pixels within radius of (px, py), north up, a square 2 radius + 1 wide.
+  // Heights in meters for the output pixels within radius of (px, py), as the box lies on the map, a square 2 radius + 1 wide.
   // terrain: the heights render returned for this output, read instead of fetching. smoothing: as for render. level: as render's waterLevel.
   // plan: a water normalization plan for fetched patches, which render has already applied to terrain.
   async function terrainPatch(bounds, width, height, px, py, radius, options) {
@@ -1117,9 +1296,10 @@ var heightmapExport = (function () {
     // The blur reaches this far. A margin this wide makes the smoothed patch match the smoothed map.
     const pad = smoothing > 0 ? 3 * (boxKernel(smoothing).r + 1) : 0;
     const full = size + 2 * pad, reach = radius + pad;
-    const region = boundsToRegion(bounds);
+    const region = boundsToRegion(bounds), frame = gridFrame(region, width, height);
     const dx = (region.x1 - region.x0) / (width - 1), dy = (region.y1 - region.y0) / (height - 1);
-    const patch = {x0: region.x0 + (px - reach) * dx, x1: region.x0 + (px + reach) * dx, y0: region.y0 + (py - reach) * dy, y1: region.y0 + (py + reach) * dy};
+    const cx = frame.ox + px * frame.ux + py * frame.vx, cy = frame.oy + px * frame.uy + py * frame.vy;
+    const patch = {x0: cx - reach * dx, x1: cx + reach * dx, y0: cy - reach * dy, y1: cy + reach * dy, angle: region.angle};
     // Sampled exactly as render samples the map so that the patch matches the heightmap.
     const heights = await sampleRegion(patch, full, full, pickZoom(region.x1 - region.x0, width, 2), function () {});
     if (polders) raisePolders(polders, heights, full, full, px - reach, py - reach, width, height);
@@ -1400,13 +1580,14 @@ var heightmapExport = (function () {
 
   // River courses, [[lat, lon], ...] lines, as [x0, y0, x1, y1, ...] in output pixels.
   function riverPixels(rivers, region, width, height) {
-    const centerLng = xToLng((region.x0 + region.x1) / 2);
+    const centerLng = xToLng((region.x0 + region.x1) / 2), frame = gridFrame(region, width, height);
     return rivers.map(line => {
       const out = new Float64Array(line.length * 2);
       line.forEach(([lat, lng], p) => {
         // OpenStreetMap longitudes stay within -180 to 180. They move to the copy of the world the region is in.
-        out[2 * p] = (lngToX(lng + 360 * Math.round((centerLng - lng) / 360)) - region.x0) / (region.x1 - region.x0) * (width - 1);
-        out[2 * p + 1] = (latToY(lat) - region.y0) / (region.y1 - region.y0) * (height - 1);
+        const at = toGrid(frame, lngToX(lng + 360 * Math.round((centerLng - lng) / 360)), latToY(lat));
+        out[2 * p] = at.x;
+        out[2 * p + 1] = at.y;
       });
       return out;
     });
@@ -1590,12 +1771,17 @@ var heightmapExport = (function () {
   // smoothing: as for render, in pixels of an image outputWidth wide.
   // normalizeWater(water, floodShare, areaKm2): given the water surfaces found, the real height rivers and lakes above it are lowered to, or null.
   // normalizeLift: as planWater's maxLift.
+  // cancelled(): optional, true once the result is no longer wanted. The analysis then rejects at its next step, always before calling limits.
   async function analyze(options) {
-    const {bounds, aspect, limits, submerge, smoothing, outputWidth, normalizeWater, normalizeLift} = options;
+    const {bounds, aspect, limits, submerge, smoothing, outputWidth, normalizeWater, normalizeLift, cancelled} = options;
+    const checkpoint = () => {
+      if (cancelled && cancelled()) throw new Error('superseded');
+    };
     const region = boundsToRegion(bounds);
     const width = Math.max(2, Math.round(PREVIEW_SIZE * Math.min(1, aspect)));
     const height = Math.max(2, Math.round(PREVIEW_SIZE * Math.min(1, 1 / aspect)));
     const heights = await sampleRegion(region, width, height, pickZoom(region.x1 - region.x0, width, 1), function () {});
+    checkpoint();
     let cover = null, landCover = null;
     try {
       cover = await fetchImageServer(LANDCOVER_URL, region, width, height, 'U8', 'RSP_NearestNeighbor');
@@ -1604,6 +1790,7 @@ var heightmapExport = (function () {
     } catch (e) {
       cover = null;
     }
+    checkpoint();
     const peak = highest(heights);
     const {floor, ceiling, scale} = limits(peak);
     const gameCell = GAME_METERS_PER_PIXEL * (outputWidth - 1) / (width - 1);
@@ -1617,11 +1804,13 @@ var heightmapExport = (function () {
     let plan = null, lifted = null;
     if (surface !== null && isFinite(surface)) {
       plan = await planWater(heights, cover, width, height, areas, gameCell, scale, surface, null, normalizeLift);
+      checkpoint();
       if (plan) lifted = await applyWaterPlan(plan, heights, width, height, 0, 0, width, height);
     }
     let bathymetry = null;
     if (sea) {
       const depths = await applyBathymetry(heights, width, height, region, sea, null, lifted);
+      checkpoint();
       bathymetry = depths.note;
       await layBeds(heights, width, height, sea, lifted, depths.surveyed, gameCell, scale);
     }
@@ -1641,7 +1830,7 @@ var heightmapExport = (function () {
   // waterFromRiver: the level is a river's lowest point. All dry land below it is raised.
   // normalizeWater: lower rivers and lakes onto the water surface limits gives, in real meters as waterSurface. normalizeLift: as planWater's maxLift.
   // rivers: optional, river courses as [[lat, lon], ...] lines for normalization. riverSlack: optional, real meters they may stray from their river.
-  // width and height are the region's, north up. northLeft turns the image a quarter left.
+  // width and height are the region's, as the box lies on the map. northLeft turns the image a quarter left.
   async function render(options) {
     const {bounds, width, height, bitDepth, range, limits, submerge, smoothing, waterLevel, raiseAbove, waterFromRiver, northLeft, normalizeWater, normalizeLift, rivers, riverSlack} = options;
     const onProgress = options.onProgress || function () {};
@@ -1735,12 +1924,18 @@ var heightmapExport = (function () {
   }
 
   return {
-    // Normalized Web Mercator: x and y run 0 to 1 from the west and north edges of the world.
-    project: function (lat, lng) {
-      return {x: lngToX(lng), y: latToY(lat)};
+    // Pixel positions on a width x height output over bounds, and back.
+    grid: function (bounds, width, height) {
+      const frame = gridFrame(boundsToRegion(bounds), width, height);
+      return {
+        toPixel: (lat, lng) => toGrid(frame, lngToX(lng), latToY(lat)),
+        toLatLng: (px, py) => ({lat: yToLat(frame.oy + px * frame.uy + py * frame.vy), lng: xToLng(frame.ox + px * frame.ux + py * frame.vx)})
+      };
     },
-    unproject: function (x, y) {
-      return {lat: yToLat(y), lng: xToLng(x)};
+    // The north-up bounds covering a turned box, for lookups that only take a bounding box.
+    enclosing: function (bounds) {
+      const r = enclosingRegion(boundsToRegion(bounds));
+      return {west: xToLng(r.x0), north: yToLat(r.y0), east: xToLng(r.x1), south: yToLat(r.y1)};
     },
     groundWidth: function (bounds) {
       return groundWidth(boundsToRegion(bounds));

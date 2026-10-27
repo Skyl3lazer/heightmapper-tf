@@ -14,6 +14,10 @@ map = (function () {
   var signs = [];
   // The climate follows the analysis's suggestion until the user picks a different one.
   var climateFollows = true;
+  // Degrees the box turns clockwise. It trails gui.rotation by up to a frame while the slider moves.
+  var rotation = 0;
+  // While the rotation slider is held: the real meters per pixel and the center from before the turn, which the turn keeps.
+  var turnScale = null, turnCenter = null, turnFrame = 0;
   var exportFolder;
   const exportDefaults = {lat: 39.109328, lng: -76.813227, metersPerPixel: 10};
   const RATIOS = ['1:1', '1:2', '1:3', '1:4', '1:5'];
@@ -60,13 +64,15 @@ map = (function () {
     'Gigantomaniac (TF3)': [[28, 28], [20, 40], [16, 48], [14, 56], [12.5, 62.5]]
   };
   
-  // L.Hash writes #zoom/lat/lng.
+  // L.Hash writes #zoom/lat/lng, and #zoom/lat/lng/rotation for a turned box.
   var url_hash = window.location.hash.slice(1, window.location.hash.length).split('/');
-  
-  if (url_hash.length == 3) {
+  var viewInHash = url_hash.length == 3 || url_hash.length == 4;
+
+  if (viewInHash) {
     map_start_location = [url_hash[1],url_hash[2], url_hash[0]];
     map_start_location = map_start_location.map(Number);
   }
+  if (url_hash.length == 4 && Math.abs(Number(url_hash[3])) <= 180) rotation = Number(url_hash[3]);
   
   var query = splitQueryParams();
 
@@ -123,7 +129,7 @@ map = (function () {
   var scene = layer.scene;
   window.scene = scene;
   
-  var startAtDefaults = url_hash.length != 3;
+  var startAtDefaults = !viewInHash;
   if (startAtDefaults) {
     map.setView([exportDefaults.lat, exportDefaults.lng], 10);
   } else {
@@ -131,7 +137,10 @@ map = (function () {
   }
   
   let hash = new L.Hash(map);
-  
+  hash.formatHash = function(map) {
+    return L.Hash.formatHash(map) + (rotation ? '/' + rotation : '');
+  };
+
   var referenceLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     opacity: 0.4,
     maxZoom: 19,
@@ -173,6 +182,7 @@ map = (function () {
     gui.mapSize = 'Gigantomaniac (TF3)';
     gui.ratio = RATIOS[0];
     gui.orientation = 'portrait';
+    gui.rotation = rotation;
     // Text fields because this dat.gui version rounds number boxes to the precision of their initial value.
     gui.center = '';
     gui.metersPerPixel = String(exportDefaults.metersPerPixel);
@@ -187,6 +197,12 @@ map = (function () {
     exportFolder.add(gui, 'mapSize', Object.keys(MAP_SIZES)).name('map size').onChange(updateExportBox);
     exportFolder.add(gui, 'ratio', RATIOS).name('ratio').onChange(regionChanged);
     exportFolder.add(gui, 'orientation', ['portrait', 'landscape']).name('orientation').onChange(regionChanged);
+    var rotationRow = exportFolder.add(gui, 'rotation', -180, 180).step(0.5).name('rotation (degrees)').onChange(turnBox).onFinishChange(finishTurn);
+    rotationRow.__precision = 2;
+    rotationRow.updateDisplay();
+    controller('rotation').__li.title = 'Turns the box clockwise on the map. The heightmap, biomes and towns follow it.';
+    // Dragging the number box up and down ends without a finish event.
+    window.addEventListener('mouseup', finishTurn);
     onEdit(exportFolder.add(gui, 'center').name('center (lat, lon)'), applyCenter);
     scaleCapHint = addSign(onEdit(exportFolder.add(gui, 'metersPerPixel').name('real m/px'), applyScale), 'info');
     exportFolder.add(gui, 'scaleMode', ['height scale', 'steepness', 'max height']).name('scale by').onChange(function(mode) {
@@ -341,7 +357,7 @@ map = (function () {
     return typeof value == typeof c.initialValue;
   }
 
-  // The export region's size in pixels, north up.
+  // The export region's size in pixels, as the box lies on the map.
   function outputSize() {
     var km = MAP_SIZES[gui.mapSize][RATIOS.indexOf(gui.ratio)];
     var shortSide = km[0] * 256 + 1, longSide = km[1] * 256 + 1;
@@ -360,33 +376,29 @@ map = (function () {
     return northLeft() ? {width: out.height, height: out.width} : out;
   }
 
-  // Largest rectangle of the output's aspect ratio that fits the map with a margin, in container pixels.
-  // capped: the box would be larger than one copy of the world. It stops at the world's size instead.
+  // Largest rectangle of the output's aspect ratio that fits the map with a margin once turned, in container pixels.
+  // left, top, spanX, spanY: the turned box's bounding rectangle. capped: that would be larger than one copy of the world. It stops at the world's size instead.
   function exportBoxRect() {
     var size = map.getSize(), out = outputSize();
     var aspect = (out.width - 1) / (out.height - 1);
-    var width = size.x * 0.9, height = size.y * 0.9;
-    if (width / height > aspect) width = height * aspect;
-    else height = width / aspect;
-    var world = map.options.crs.scale(map.getZoom()), capped = width > world || height > world;
-    if (width > world) {
-      width = world;
-      height = width / aspect;
-    }
-    if (height > world) {
-      height = world;
-      width = height * aspect;
-    }
-    return {left: (size.x - width) / 2, top: (size.y - height) / 2, width: width, height: height, capped: capped};
+    var angle = rotation * Math.PI / 180, cos = Math.abs(Math.cos(angle)), sin = Math.abs(Math.sin(angle));
+    // The bounding rectangle of a box one pixel high.
+    var unitX = aspect * cos + sin, unitY = aspect * sin + cos;
+    var height = Math.min(size.x * 0.9 / unitX, size.y * 0.9 / unitY);
+    var world = map.options.crs.scale(map.getZoom()), capped = height * unitX > world || height * unitY > world;
+    height = Math.min(height, world / unitX, world / unitY);
+    var spanX = height * unitX, spanY = height * unitY;
+    return {left: (size.x - spanX) / 2, top: (size.y - spanY) / 2, width: height * aspect, height: height, spanX: spanX, spanY: spanY, capped: capped};
   }
 
+  // The box before it turns, with the rotation that turns it around its center.
   // Projects from the exact center because containerPointToLatLng snaps to Leaflet's whole-pixel origin.
   function exportBounds() {
     var r = exportBoxRect(), zoom = map.getZoom();
     var center = map.project(map.getCenter(), zoom);
     var nw = map.unproject([center.x - r.width / 2, center.y - r.height / 2], zoom);
     var se = map.unproject([center.x + r.width / 2, center.y + r.height / 2], zoom);
-    return {west: nw.lng, north: nw.lat, east: se.lng, south: se.lat};
+    return {west: nw.lng, north: nw.lat, east: se.lng, south: se.lat, rotation: rotation};
   }
 
   // World pixels to move the box down by to keep it inside the world, centered when it can't fit.
@@ -400,7 +412,7 @@ map = (function () {
   function keepBoxInWorld() {
     var zoom = map.getZoom(), r = exportBoxRect();
     var center = map.project(map.getCenter(), zoom);
-    var shift = boxOverflow(center.y - r.height / 2, r.height);
+    var shift = boxOverflow(center.y - r.spanY / 2, r.spanY);
     // A reset keeps the exact center. Without it Leaflet pans by whole screen pixels.
     if (Math.abs(shift) > 0.01) map.setView(map.unproject([center.x, center.y + shift], zoom), zoom, {reset: true});
   }
@@ -408,7 +420,7 @@ map = (function () {
   // Leaflet's maxBounds limits the whole view, not a box inside it. Drags are limited here instead.
   function limitDrag() {
     var r = exportBoxRect();
-    this._newPos.y -= boxOverflow(r.top - this._newPos.y + map.getPixelOrigin().y, r.height);
+    this._newPos.y -= boxOverflow(r.top - this._newPos.y + map.getPixelOrigin().y, r.spanY);
   }
 
   function metersPerPixel() {
@@ -421,14 +433,19 @@ map = (function () {
 
   function updateExportBox() {
     var r = exportBoxRect(), mpp = metersPerPixel();
-    var box = document.getElementById('export-box');
+    var box = document.getElementById('export-box'), frame = document.getElementById('export-box-frame');
     box.style.left = r.left + 'px';
     box.style.top = r.top + 'px';
-    box.style.width = r.width + 'px';
-    box.style.height = r.height + 'px';
+    box.style.width = r.spanX + 'px';
+    box.style.height = r.spanY + 'px';
+    frame.style.left = (r.spanX - r.width) / 2 + 'px';
+    frame.style.top = (r.spanY - r.height) / 2 + 'px';
+    frame.style.width = r.width + 'px';
+    frame.style.height = r.height + 'px';
+    frame.style.transform = rotation ? 'rotate(' + rotation + 'deg)' : '';
     var image = imageSize();
     document.getElementById('export-box-size').textContent = image.width + ' x ' + image.height + ' px' +
-      (northLeft() ? ' with north on the left' : '') + ', real ' + realSize(exportBounds());
+      (northLeft() ? ' with north on the left' : '') + (rotation ? ', turned ' + rotation + ' degrees' : '') + ', real ' + realSize(exportBounds());
 
     var center = map.getCenter();
     gui.center = center.lat.toFixed(6) + ', ' + center.lng.toFixed(6);
@@ -480,6 +497,46 @@ map = (function () {
   function regionChanged() {
     updateExportBox();
     scheduleAnalysis();
+  }
+
+  // Slider moves come faster than the map redraws, so at most one is applied per frame. The analysis waits for finishTurn.
+  // The map moves the way Leaflet's flyTo moves it. setView resets the view, which drops every reference map tile and fades them back in.
+  function turnBox() {
+    // dat.gui sets the value again on every blur.
+    if (turnScale === null && gui.rotation === rotation) return;
+    if (turnScale === null) {
+      turnScale = metersPerPixel();
+      turnCenter = map.getCenter();
+      // A measurement still running describes the box before the turn.
+      analysisGeneration++;
+      map._moveStart(true);
+    }
+    if (!turnFrame) {
+      turnFrame = requestAnimationFrame(function() {
+        turnFrame = 0;
+        fitTurn();
+      });
+    }
+  }
+
+  // moveend then schedules the analysis and rewrites the hash.
+  function finishTurn() {
+    if (turnScale === null) return;
+    cancelAnimationFrame(turnFrame);
+    turnFrame = 0;
+    fitTurn();
+    var scale = turnScale;
+    turnScale = null;
+    map._moveEnd(true);
+    // Near a pole the box limit can move the center, which shifts the scale.
+    if (Math.abs(Math.log2(metersPerPixel() / scale)) > 1e-4) zoomToScale(map.getCenter(), scale);
+  }
+
+  // The turned box fits the screen at a different size. Meters per pixel halve with each zoom level, so one step lands on the scale.
+  function fitTurn() {
+    rotation = gui.rotation;
+    var zoom = map.getZoom() + Math.log2(metersPerPixel() / turnScale);
+    map._move(turnCenter, Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), zoom)));
   }
 
   function controllers() {
@@ -712,7 +769,9 @@ map = (function () {
     placeBoxLabel();
   }
 
-  var scheduleAnalysis = debounce(runAnalysis, 300);
+  var scheduleAnalysis = debounce(function() {
+    if (turnScale === null) runAnalysis();
+  }, 300);
 
   async function runAnalysis() {
     var generation = ++analysisGeneration;
@@ -723,11 +782,11 @@ map = (function () {
       var result = await heightmapExport.analyze({
         bounds: exportBounds(),
         aspect: (out.width - 1) / (out.height - 1),
-        // A superseded run must not change the height scale the newer one measures with.
-        limits: function(peak) {
-          if (generation != analysisGeneration) throw new Error('superseded');
-          return heightLimits(peak);
+        // A superseded run stops early, so it never changes the height scale the newer one measures with.
+        cancelled: function() {
+          return generation != analysisGeneration;
         },
+        limits: heightLimits,
         submerge: previewSubmerge,
         normalizeWater: gui.waterNormalization ? previewWaterSurface : null,
         normalizeLift: gui.normalizationLift,
@@ -1112,12 +1171,13 @@ map = (function () {
   // Maps too big for an OpenStreetMap lookup take Natural Earth's major rivers instead.
   async function riverLines(job, report) {
     report('Looking up rivers...');
+    var area = heightmapExport.enclosing(job.bounds);
     try {
-      var lines = await overpass.rivers(job.bounds, RIVER_MIN_LENGTH * job.mpp / GAME_METERS_PER_PIXEL);
+      var lines = await overpass.rivers(area, RIVER_MIN_LENGTH * job.mpp / GAME_METERS_PER_PIXEL);
       if (lines) return {lines: lines, note: lines.length + ' OpenStreetMap river lines'};
       // The web map zoom whose pixels match the export's.
       var zoom = Math.log2((job.out.width - 1) * 360 / ((job.bounds.east - job.bounds.west) * 256));
-      lines = await naturalEarthRivers(job.bounds, zoom - NATURAL_EARTH_ZOOM_LAG);
+      lines = await naturalEarthRivers(area, zoom - NATURAL_EARTH_ZOOM_LAG);
       return {lines: lines, note: lines.length + ' Natural Earth river lines', slack: NATURAL_EARTH_SLACK};
     } catch (e) {
       return {lines: null, note: 'river lines unavailable (' + e.message + ')'};
@@ -1172,7 +1232,8 @@ map = (function () {
       m.cappedFraction > 0 ? (m.cappedFraction * 100).toFixed(2) + '% of the map was above the game\'s ' + GAME_MAX_HEIGHT + ' m limit and was flattened. Lower the height scale to keep those peaks.' : null,
       'real ' + realSize(job.bounds) + ' at ' + m.metersPerPixel.toFixed(3) + ' m/px',
       'center ' + m.centerLat.toFixed(6) + ', ' + m.centerLng.toFixed(6),
-      'bounds W ' + m.west.toFixed(6) + ' S ' + m.south.toFixed(6) + ' E ' + m.east.toFixed(6) + ' N ' + m.north.toFixed(6),
+      'bounds W ' + m.west.toFixed(6) + ' S ' + m.south.toFixed(6) + ' E ' + m.east.toFixed(6) + ' N ' + m.north.toFixed(6) +
+        (m.rotation ? ', turned ' + m.rotation + ' degrees clockwise around the center' : ''),
       'source zoom ' + m.sourceZoom + (m.upsampled ? ' (output is finer than the source data, upsampled)' : '')
     ].filter(function(line) { return line !== null; });
   }
@@ -1186,7 +1247,7 @@ map = (function () {
     if (job.climate == 'Tropical') {
       report('Looking up volcanoes...');
       try {
-        volcanoes = await overpass.nodes(job.bounds, '["natural"="volcano"]');
+        volcanoes = await overpass.nodes(heightmapExport.enclosing(job.bounds), '["natural"="volcano"]');
       } catch (e) {
         if (!lenient) throw e;
         volcanoError = e.message;

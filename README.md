@@ -23,6 +23,7 @@ You now have a fully playable map!
 
 - maximum height, minimum height, water level: the values to enter in the game. With auto-exposure on they are measured from the area inside the box, or you can type your own. The game accepts heights from -100 to 3177. Auto-exposure lowers the height scale or steepness just enough to fit the highest point under 3177. It returns to your value when you move somewhere lower. With auto-exposure off, terrain above 3177 is flattened.
 - The box label lists the water levels of the flat water surfaces it finds (seas, lakes, reservoirs), largest first, with their area. Transport Fever has a single water level, so pick the one you want and enter it in the game. Auto-exposure picks the largest water body that doesn't flood the entire map, but it's not going to work in every situation.
+- rotation (degrees): turns the box clockwise on the map. The map zooms slightly as you turn it so real meters per pixel stays the same.
 - climate: the Transport Fever 3 climate the map is for. The box label suggests one from the latitude and land cover inside the box.
 - export biomes: writes `<file name>_biomes.png` plus the climate's masks for Transport Fever 3's Biomes import, the same size as the heightmap. Based on climate, this includes: 
     - temperate: mountains, and rivers
