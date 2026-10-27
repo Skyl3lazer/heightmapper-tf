@@ -8,7 +8,8 @@ var heightmapExport = (function () {
   // Mapterhorn's 512 px tile at zoom z covers the four 256 px tiles at zoom z + 1, the grid the export samples.
   const SOURCE_SIZE = 512;
   const TILE_SIZE = 256;
-  const MAX_ZOOM = 15;
+  // Mapterhorn's zoom 18, its finest. Where it has less, a missing tile comes from the parent.
+  const MAX_ZOOM = 19;
   // Decoded source tiles kept, about 1 MB each, enough for two tile rows of the widest map.
   const SOURCE_CACHE = 128;
   const EARTH_CIRCUMFERENCE = 40075016.686;
@@ -47,6 +48,8 @@ var heightmapExport = (function () {
   const NORMALIZE_SURFACE_TOLERANCE = 2;
   // Coarse cells lowered water may reach past the cells land cover gives it, where a cell less than half water still holds the true shore.
   const LOWERED_GROWTH = 0.5;
+  // In-game meters land cover's water may grow across the flat water surface it sits on. Land cover's 10 m cells would cut the shore into steps.
+  const SURFACE_REACH = 100;
   // Real meters below the waterline past which dry land counts as polder even where the water seems to reach it.
   const POLDER_DEPTH = 1.5;
   // Smaller enclosed low patches are hollows in tidal marsh and the like, which the water keeps.
@@ -1380,6 +1383,31 @@ var heightmapExport = (function () {
   }
 
   // Plans water normalization on a gw x gh grid: how far to lower each cell so rivers and lakes above the water level reach it.
+  // Grows water by up to reach cells across the flat surface it sits on, so the elevation data's own shore bounds it.
+  // A cell joins when it is flat along both axes, as for findWaterSurfaces, and even with the water beside it. A wall breaks the surface, which keeps low land behind it dry.
+  function growAcrossFlatWater(water, heights, gw, gh, reach) {
+    const even = (i, j) => Math.abs(heights[i] - heights[j]) < FLAT_TOLERANCE;
+    const flat = i => {
+      const x = i % gw;
+      return ((x > 0 && even(i, i - 1)) || (x < gw - 1 && even(i, i + 1))) && ((i >= gw && even(i, i - gw)) || (i < water.length - gw && even(i, i + gw)));
+    };
+    let front = [];
+    for (let i = 0; i < water.length; i++) if (water[i] && flat(i)) front.push(i);
+    for (let step = 0; step < reach && front.length; step++) {
+      const next = [];
+      for (const i of front) {
+        const x = i % gw;
+        for (const j of [x > 0 ? i - 1 : -1, x < gw - 1 ? i + 1 : -1, i - gw, i + gw]) {
+          if (j >= 0 && j < water.length && !water[j] && even(i, j) && flat(j)) {
+            water[j] = 1;
+            next.push(j);
+          }
+        }
+      }
+      front = next;
+    }
+  }
+
   // heights and cover: real meters and land cover classes on the grid. areas: as rowAreas gives. gameCell: in-game meters per cell.
   // level: real meters the water should end at. Returns null when there is no water to work from.
   // rivers: optional, river courses on the grid. Land cover misses rivers narrower than its 10 m cells can see.
@@ -1388,6 +1416,7 @@ var heightmapExport = (function () {
     const n = gw * gh;
     const water = new Uint8Array(n);
     for (let i = 0; i < n; i++) if (cover[i] === LC_WATER || (rivers && rivers[i])) water[i] = 1;
+    growAcrossFlatWater(water, heights, gw, gh, Math.round(SURFACE_REACH / gameCell));
     // Trees and bridges break rivers into pieces. Pieces two cells apart count as one water body.
     const {labels, count} = label(distanceTo(water, gw, gh).map(d => d <= 2 ? 1 : 0), gw, gh);
     const bodyArea = new Float64Array(count + 1), bodyCells = new Float64Array(count + 1);

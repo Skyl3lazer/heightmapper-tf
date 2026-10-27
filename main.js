@@ -838,11 +838,12 @@ map = (function () {
   }
 
   // In-game water levels with their total surface area and the share of the map's dry land each would drown, largest first.
-  // normalizing: tidal water joins the sea at 0 m for normalization to lower. Without it, tidal water is sea at its own height and the land below it is raised.
+  // normalizing: tidal water joins the sea at 0 m for normalization to lower. Without it, tidal water on a map with no other sea is sea at its own height, and the land below it is raised.
   function waterChoices(water, k, floodShare, carved, normalizing) {
     var choices = [];
+    var atSea = normalizing || water.some(function(w) { return w.sea && !w.tidal; });
     water.forEach(function(w) {
-      var line = waterLineFor(w.tidal && normalizing ? {top: 0} : w, k, carved);
+      var line = waterLineFor(w.tidal && atSea ? {top: 0} : w, k, carved);
       var same = choices.filter(function(c) { return c.level == line.level; })[0];
       if (same) {
         same.areaKm2 += w.areaKm2;
@@ -951,6 +952,9 @@ map = (function () {
     var uniforms = scene.styles.hillshade.shaders.uniforms;
     uniforms.u_min = h.min / h.k;
     uniforms.u_max = h.max / h.k;
+    // Mapterhorn publishes no tiles of open sea. The gaps show the gray the sea is drawn in.
+    var sea = Math.round(255 * Math.min(1, Math.max(0, -uniforms.u_min / (uniforms.u_max - uniforms.u_min))));
+    map.getContainer().style.backgroundColor = 'rgb(' + sea + ', ' + sea + ', ' + sea + ')';
     scene.requestRedraw();
   }
 
