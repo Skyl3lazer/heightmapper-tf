@@ -18,6 +18,9 @@ ap.add_argument('--fit', default='2,8')               # px from the line, the sp
 ap.add_argument('--sigma', type=float, default=4.0)   # px, how far along the shore the fit reaches
 ap.add_argument('--lo', type=float, default=0.25)     # game m per px, the gentlest crossing
 ap.add_argument('--hi', type=float, default=2.0)      # game m per px, the steepest crossing
+ap.add_argument('--cross', default='mean')             # mean of the land and bed slopes, or the land's own slope
+ap.add_argument('--raise-from', type=float, default=None)  # game m per px of land slope above which the band may also raise land, fully from 1 more
+ap.add_argument('--step-reach', type=float, default=None)  # px, the crossing climbs the land's step at the line within this distance at least
 args = ap.parse_args()
 
 
@@ -83,7 +86,12 @@ def trend(ring):
 
 land_slope, land_at = trend(~clean & (sd >= near) & (sd <= far))
 bed_slope, bed_at = trend(clean & (sd <= -near) & (sd >= -far))
-cross = np.clip(np.nanmean(np.stack([land_slope, bed_slope]), 0), args.lo, args.hi)
+both = np.nanmean(np.stack([land_slope, bed_slope]), 0)
+cross = np.where(np.isnan(land_slope), both, land_slope) if args.cross == 'land' else both
+if args.step_reach:
+    # a plateau above the water is climbed at the water, which a gentle crossing would leave as a low strip with a crease behind it
+    cross = np.fmax(cross, np.clip(land_at, 0, None) / args.step_reach)
+cross = np.clip(cross, args.lo, args.hi)
 cross = np.where(np.isnan(cross), 1.0, cross)
 
 
@@ -98,6 +106,10 @@ lip_w, bed = blend(clean)
 out = g.copy()
 # the crossing line may lower land and raise the bed, never the reverse, so low marsh grows no berm and shallow beds no pit
 out[lip_l] = np.minimum(land[lip_l], g[lip_l])
+if args.raise_from is not None:
+    # below a steep bank a low strip is raised to the bank's own line, where flat land would grow a berm instead
+    share = np.clip(np.nan_to_num(land_slope) - args.raise_from, 0, 1)
+    out[lip_l] = np.where(land[lip_l] > g[lip_l], g[lip_l] + share[lip_l] * (land[lip_l] - g[lip_l]), out[lip_l])
 out[lip_w] = np.maximum(bed[lip_w], g[lip_w])
 new = np.clip(plane + out / k, black, white)
 q = np.round((new - black) / (white - black) * 65535).astype(np.uint16)

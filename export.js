@@ -1229,21 +1229,23 @@ var heightmapExport = (function () {
       const side = mask[start];
       let head = 0, tail = 0, small = true;
       queue[tail++] = start;
-      seen[start] = 1;
+      seen[start] = 2;
       while (head < tail && small) {
         const i = queue[head++], x = i % width;
         if (x === 0 || x === width - 1 || i < width || i >= mask.length - width) small = false;
         for (const j of [i - 1, i + 1, i - width, i + width]) {
           if (!small || j < 0 || j >= mask.length || mask[j] !== side || (j === i - 1 && x === 0) || (j === i + 1 && x === width - 1)) continue;
-          // A seen pixel on this side belongs to a patch already found to be large.
-          if (seen[j]) small = false;
+          // A pixel this patch already holds is 2. One from an earlier patch is 1, and that patch was found to be large.
+          if (seen[j] === 1) small = false;
+          else if (seen[j] === 2) continue;
           else if (tail === limit) small = false;
           else {
-            seen[j] = 1;
+            seen[j] = 2;
             queue[tail++] = j;
           }
         }
       }
+      for (let q = 0; q < tail; q++) seen[queue[q]] = 1;
       if (small) for (let q = 0; q < tail; q++) mask[queue[q]] = 1 - side;
     }
   }
