@@ -8,6 +8,8 @@ map = (function () {
   var moving = false;
   var analysis = null;
   var analysisGeneration = 0;
+  // The worker that measures the box, kept between runs for its tile cache, and how to drop the run it is on.
+  var analysisWorker = null, abandonRun = null;
   // What the user typed into the field "scale by" picks. Auto mode may show less there so high peaks fit under the game's limit.
   var requestedText = '1';
   var steepnessWarning, heightScaleHint, climateHint, waterHint, bitDepthHint, townNamesHint;
@@ -783,19 +785,19 @@ map = (function () {
       var out = outputSize();
       setBoxWater('measuring...');
       setMeasuring(true);
-      var result = await heightmapExport.analyze({
+      // A superseded run ends before it calls back, so it never changes the height scale the newer one measures with.
+      var result = await analyzeOffPage({
         bounds: exportBounds(),
         aspect: (out.width - 1) / (out.height - 1),
-        // A superseded run stops early, so it never changes the height scale the newer one measures with.
-        cancelled: function() {
-          return generation != analysisGeneration;
-        },
-        limits: heightLimits,
-        submerge: previewSubmerge,
-        normalizeWater: gui.waterNormalization ? previewWaterSurface : null,
         normalizeLift: gui.normalizationLift,
         smoothing: gui.smoothing / GAME_METERS_PER_PIXEL,
         outputWidth: out.width
+      }, {
+        limits: heightLimits,
+        submerge: previewSubmerge,
+        normalizeWater: gui.waterNormalization ? previewWaterSurface : null
+      }, function() {
+        return generation != analysisGeneration;
       });
     } catch (e) {
       if (generation == analysisGeneration) {
@@ -814,6 +816,49 @@ map = (function () {
     }
     if (gui.autoexpose) applyAnalysis();
     else describeWater();
+  }
+
+  // Runs heightmapExport.analyze in a worker, so the map keeps moving while the box is measured.
+  // options: analyze's options without its callbacks. callbacks: its limits, submerge and normalizeWater, which run here when the worker asks.
+  // stale(): true once the result is no longer wanted. A run still measuring when the next starts ends with its worker, since a busy worker can't stop itself.
+  function analyzeOffPage(options, callbacks, stale) {
+    if (abandonRun) abandonRun();
+    var worker = analysisWorker = analysisWorker || new Worker('analysis-worker.js');
+    return new Promise(function(resolve, reject) {
+      function drop(error) {
+        worker.onmessage = worker.onerror = null;
+        worker.terminate();
+        if (analysisWorker === worker) analysisWorker = null;
+        abandonRun = null;
+        reject(error);
+      }
+      abandonRun = function() { drop(new Error('superseded')); };
+      worker.onmessage = function(e) {
+        var m = e.data;
+        if (m.type == 'call') {
+          if (stale()) return abandonRun();
+          try {
+            var args = m.args;
+            if (m.name != 'limits') args[1] = heightmapExport.floodShareFor(args[1]);
+            worker.postMessage({type: 'reply', id: m.id, value: callbacks[m.name].apply(null, args)});
+          } catch (err) {
+            drop(err);
+          }
+          return;
+        }
+        abandonRun = null;
+        if (m.type == 'done') {
+          m.result.floodShare = heightmapExport.floodShareFor(m.result.flood);
+          resolve(m.result);
+        } else {
+          reject(new Error(m.message));
+        }
+      };
+      worker.onerror = function(e) {
+        drop(new Error('the analysis failed: ' + (e.message || 'worker error')));
+      };
+      worker.postMessage({type: 'analyze', options: options, callbacks: Object.keys(callbacks).filter(function(k) { return callbacks[k]; })});
+    });
   }
 
   // The preview takes NOAA depths below the water level the analysis is about to pick, or the typed one.

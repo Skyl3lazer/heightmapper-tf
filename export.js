@@ -800,26 +800,29 @@ var heightmapExport = (function () {
         merged.push({base: low, top: low, area: mappedArea, river: true});
       }
     }
-    // Dry land, sorted, so the share a water level would drown is a binary search.
     const dry = [];
     for (let i = 0; i < heights.length; i++) {
       if (!claimed[i] && !isWater(i)) dry.push(heights[i]);
-    }
-    const drySorted = Float32Array.from(dry).sort();
-    function floodShare(level) {
-      let lo = 0, hi = drySorted.length;
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1;
-        if (drySorted[mid] <= level) lo = mid + 1;
-        else hi = mid;
-      }
-      return lo / heights.length;
     }
     return {
       surfaces: merged
         .map(m => ({level: m.base, top: m.top, areaKm2: m.area / 1e6, sea: Boolean(m.sea), river: Boolean(m.river), tidal: Boolean(m.tidal)}))
         .sort((a, b) => b.areaKm2 - a.areaKm2),
-      floodShare: floodShare
+      flood: {dry: Float32Array.from(dry).sort(), cells: heights.length}
+    };
+  }
+
+  // The share of the map a water level in real meters would drown, as a function of the level.
+  // flood: findWaterSurfaces's dry land heights, sorted so the share is a binary search, and the map's cell count. It is plain data so it can leave a worker.
+  function floodShareFor(flood) {
+    return function (level) {
+      let lo = 0, hi = flood.dry.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (flood.dry[mid] <= level) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo / flood.cells;
     };
   }
 
@@ -2149,23 +2152,18 @@ var heightmapExport = (function () {
     return beds;
   }
 
-  // Coarse pass for live feedback: extremes and water surfaces, without fetching full-resolution tiles.
+  // Coarse pass for live feedback: extremes and water surfaces, without fetching full-resolution tiles. The callbacks may answer with a promise.
   // limits(peak): given the highest point in meters, the {floor, ceiling} in meters that heights are clamped into.
-  // submerge(water, floodShare, areaKm2): given the water surfaces found, the {level, top} in meters for applyBathymetry, or null.
+  // submerge(water, flood, areaKm2): given the water surfaces found and floodShareFor's table, the {level, top} in meters for applyBathymetry, or null.
   // smoothing: as for render, in pixels of an image outputWidth wide.
-  // normalizeWater(water, floodShare, areaKm2): given the water surfaces found, the real height rivers and lakes above it are lowered to, or null.
+  // normalizeWater(water, flood, areaKm2): as submerge, the real height rivers and lakes above it are lowered to, or null.
   // normalizeLift: as planWater's maxLift.
-  // cancelled(): optional, true once the result is no longer wanted. The analysis then rejects at its next step, always before calling limits.
   async function analyze(options) {
-    const {bounds, aspect, limits, submerge, smoothing, outputWidth, normalizeWater, normalizeLift, cancelled} = options;
-    const checkpoint = () => {
-      if (cancelled && cancelled()) throw new Error('superseded');
-    };
+    const {bounds, aspect, limits, submerge, smoothing, outputWidth, normalizeWater, normalizeLift} = options;
     const region = boundsToRegion(bounds);
     const width = Math.max(2, Math.round(PREVIEW_SIZE * Math.min(1, aspect)));
     const height = Math.max(2, Math.round(PREVIEW_SIZE * Math.min(1, 1 / aspect)));
     const heights = await sampleRegion(region, width, height, pickZoom(region.x1 - region.x0, width, 1), function () {});
-    checkpoint();
     let cover = null, landCover = null;
     try {
       cover = await fetchImageServer(LANDCOVER_URL, region, width, height, 'U8', 'RSP_NearestNeighbor');
@@ -2174,27 +2172,24 @@ var heightmapExport = (function () {
     } catch (e) {
       cover = null;
     }
-    checkpoint();
     const peak = highest(heights);
-    const {floor, ceiling, scale} = limits(peak);
+    const {floor, ceiling, scale} = await limits(peak);
     const gameCell = GAME_METERS_PER_PIXEL * (outputWidth - 1) / (width - 1);
     let extremes = clampAndMeasure(heights, floor, ceiling);
     const areas = rowAreas(region, width, height);
-    const {surfaces: water, floodShare} = findWaterSurfaces(heights, width, height, areas, floor, ceiling, cover);
+    const {surfaces: water, flood} = findWaterSurfaces(heights, width, height, areas, floor, ceiling, cover);
     const areaKm2 = areas.reduce((sum, a) => sum + a, 0) * width / 1e6;
-    const sea = submerge ? submerge(water, floodShare, areaKm2) : null;
+    const sea = submerge ? await submerge(water, flood, areaKm2) : null;
     // The level comes from the map as it is. Lowering water onto it can't change which level that is.
-    const surface = normalizeWater && cover ? normalizeWater(water, floodShare, areaKm2) : null;
+    const surface = normalizeWater && cover ? await normalizeWater(water, flood, areaKm2) : null;
     let plan = null, lifted = null;
     if (surface !== null && isFinite(surface)) {
       plan = await planWater(heights, cover, width, height, areas, gameCell, scale, surface, null, normalizeLift);
-      checkpoint();
       if (plan) lifted = await applyWaterPlan(plan, heights, width, height, 0, 0, width, height);
     }
     let bathymetry = null;
     if (sea) {
       const depths = await applyBathymetry(heights, width, height, region, sea, null, lifted);
-      checkpoint();
       bathymetry = depths.note;
       await layBeds(heights, width, height, sea, lifted, depths.surveyed, gameCell, scale);
     }
@@ -2202,7 +2197,7 @@ var heightmapExport = (function () {
     if (sea || smoothing || lifted) extremes = clampAndMeasure(heights, floor, ceiling);
     return {
       min: extremes.lo, max: extremes.hi, peak: peak, groundWidth: groundWidth(region), areaKm2: areaKm2,
-      water: water, floodShare: floodShare, bathymetry: bathymetry, normalized: plan ? plan.stats : null,
+      water: water, flood: flood, bathymetry: bathymetry, normalized: plan ? plan.stats : null,
       landCover: landCover, centerLat: yToLat((region.y0 + region.y1) / 2)
     };
   }
@@ -2339,6 +2334,7 @@ var heightmapExport = (function () {
       return (bounds.north - bounds.south) / 360 * EARTH_CIRCUMFERENCE;
     },
     analyze: analyze,
+    floodShareFor: floodShareFor,
     render: render,
     renderBiomes: renderBiomes,
     terrainPatch: terrainPatch,
