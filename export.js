@@ -56,8 +56,12 @@ var heightmapExport = (function () {
   const MIN_SHORE_PATCH = 16;
   // In-game meters per pixel the shoreline crosses at where neither side has terrain to fit.
   const SHORE_SLOPE = 1;
-  // In-game meters per pixel, the gentlest and the steepest the shoreline may cross at.
-  const SHORE_CROSSING_MIN = 0.25, SHORE_CROSSING_MAX = 2;
+  // In-game meters per pixel, the gentlest and the steepest the shoreline may cross at. A lower cap leaves a gentler foot below a cliff.
+  const SHORE_CROSSING_MIN = 0.25, SHORE_CROSSING_MAX = 8;
+  // Pixels within which the crossing climbs the land's own height at the shoreline. A slower climb leaves a low strip at the water below a plateau.
+  const SHORE_STEP_REACH = 3;
+  // In-game meters per pixel of land slope from which the band may also raise land, fully at one more. Raising flatter land would grow a berm.
+  const SHORE_RAISE_FROM = 0.5;
   // Pixels each side of the shoreline over which heights blend from the crossing into the terrain. A wider band turns every shore into the same ramp.
   const SHORE_BAND = 6;
   // Pixels from the shoreline, nearest and farthest, that each side's own slope is fitted over.
@@ -1019,7 +1023,7 @@ var heightmapExport = (function () {
 
   // Redraws the shoreline smoothly. The water mask is blurred and cut at one half, which drops stray pixels and spurs, and patches under MIN_SHORE_PATCH pixels change sides.
   // Heights within SHORE_BAND of the new line blend from one slope across it into the terrain, so the game's interpolated waterline follows the line instead of the pixel steps.
-  // That slope is the mean of the slopes the land and the bed keep on their own, so a steep shore stays steep and the step at the water spreads across the band.
+  // That slope is the land's own, climbing the land's height at the line within SHORE_STEP_REACH, so the bank neither steps at the water nor leaves a strip below it.
   // waterline: real meters at or below which a pixel is water. plane: real meters of the game's water level. scale: the height scale. onProgress(fraction): awaited.
   async function shapeShores(heights, width, height, waterline, plane, scale, onProgress) {
     const slope = SHORE_SLOPE / scale, progress = onProgress || function () {};
@@ -1125,13 +1129,14 @@ var heightmapExport = (function () {
             if (!filled[k]) continue;
             for (let c = 0; c < 10; c++) acc[c] += kernel[t + r] * sums[(c * rows + k) * width + x];
           }
-          const land = fit(0), bed = fit(5);
-          const mean = isNaN(land) ? (isNaN(bed) ? slope : bed) : isNaN(bed) ? land : (land + bed) / 2;
-          const cross = Math.min(hi, Math.max(lo, mean)), g = heights[i] - plane;
-          const t = Math.abs(d) / SHORE_BAND, w = t * t * (3 - 2 * t), v = w * g + (1 - w) * cross * d;
-          // The crossing may lower land and raise the bed, never the reverse, so low marsh grows no berm and a shallow bed no pit.
+          const land = fit(0);
+          let cross = isNaN(land) ? fit(5) : Math.max(land, Math.max(0, (acc[3] - land * acc[1]) / acc[0]) / SHORE_STEP_REACH);
+          cross = isNaN(cross) ? slope : Math.min(hi, Math.max(lo, cross));
+          const g = heights[i] - plane, t = Math.abs(d) / SHORE_BAND, w = t * t * (3 - 2 * t), v = w * g + (1 - w) * cross * d;
+          // The bed is only raised, which digs no pit. Land is raised only below a steep bank, which on flat ground would grow a berm.
+          const share = isNaN(land) ? 0 : Math.min(1, Math.max(0, land * scale - SHORE_RAISE_FROM));
           changed.push(i);
-          values.push(plane + (water[i] ? Math.max(v, g) : Math.min(v, g)));
+          values.push(plane + (water[i] ? Math.max(v, g) : v < g ? v : g + share * (v - g)));
         }
       }
       await progress(0.5 + 0.5 * y1 / height);

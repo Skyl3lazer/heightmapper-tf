@@ -21,6 +21,7 @@ ap.add_argument('--hi', type=float, default=2.0)      # game m per px, the steep
 ap.add_argument('--cross', default='mean')             # mean of the land and bed slopes, or the land's own slope
 ap.add_argument('--raise-from', type=float, default=None)  # game m per px of land slope above which the band may also raise land, fully from 1 more
 ap.add_argument('--step-reach', type=float, default=None)  # px, the crossing climbs the land's step at the line within this distance at least
+ap.add_argument('--bed-reach', type=float, default=None)  # px, a bed below a steep bank deepens with it, down to the bed this far further out
 args = ap.parse_args()
 
 
@@ -85,6 +86,17 @@ def trend(ring):
 
 
 land_slope, land_at = trend(~clean & (sd >= near) & (sd <= far))
+if args.bed_reach:
+    # an estimated or coarsely surveyed bed is too shallow below a steep bank, which shows as a crease at the waterline
+    # The bed further out along the shore normal bounds it. The look ahead shrinks to nothing by twice the reach, so the point it reads keeps moving outward.
+    ahead = args.bed_reach * np.clip(1 - np.abs(sd) / (2 * args.bed_reach), 0, 1)
+    ny, nx = np.gradient(ndimage.gaussian_filter(sd, 1.0))
+    norm = np.maximum(np.hypot(ny, nx), 1e-6)
+    yy, xx = np.mgrid[0:g.shape[0], 0:g.shape[1]].astype(np.float32)
+    beyond = ndimage.map_coordinates(g, [yy - ahead * ny / norm, xx - ahead * nx / norm], order=1, mode='nearest')
+    del yy, xx
+    bank = np.clip(np.nan_to_num(land_slope, nan=0.0), 0.4, args.hi)
+    g = np.where(clean & (ahead > 0), np.minimum(g, np.maximum(-bank * np.abs(sd), np.minimum(beyond, 0))), g)
 bed_slope, bed_at = trend(clean & (sd <= -near) & (sd >= -far))
 both = np.nanmean(np.stack([land_slope, bed_slope]), 0)
 cross = np.where(np.isnan(land_slope), both, land_slope) if args.cross == 'land' else both
