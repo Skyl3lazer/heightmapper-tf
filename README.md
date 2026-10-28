@@ -9,7 +9,7 @@ A fork of [tangrams/heightmapper](https://github.com/tangrams/heightmapper) that
 ### Usage
 
 1. Pick the map size, ratio and orientation in the "heightmap export" panel. The red box in the middle of the view shows the area that will be exported.
-2. Pan and zoom until the box covers the region you want.
+2. Pan and zoom until the box covers the region you want. Hold Shift while scrolling to zoom in fine steps.
 3. Customize any generator options such as climate, town count, etc.
 4. Click "export all" for a zip with the heightmap, biome maps and towns, laid out like the game's user folder. Extract it into `%APPDATA%\Transport Fever 3`. The individual export buttons save single files instead.
 5. In the map editor, create a map of the size and climate you've chosen.
@@ -32,9 +32,10 @@ You now have a fully playable map!
     - subarctic: lakes, mountains, and swamps
 - scale by, height scale, steepness: how real heights become in-game heights. Height scale is in-game height per real meter. A height scale of 1 keeps real heights. Steepness is how many times steeper than real the slopes come out. The game draws each pixel 4 m wide. A map covering more than 4 real meters per pixel squeezes the land sideways, leading to crazy tall mountains. "Scale by" lets you switch between modes to find whatever you think looks best. Steepness above 4x or so will look weird depending on the region. Heights scale around sea level so it stays at the water level.
 - smoothing (in-game m): blurs the land over roughly this distance in the game's own meters, to calm bumpy real-world data. 0 turns it off. Water and the shoreline are left as they are.
-- include ocean data / ocean floor (m): Water below the water level takes its depth from NOAA's DEM Global Mosaic which has real depths where the elevation tiles store water as a flat surface. The ocean floor sets the lowest in-game height allowed. With it off, everything below sea level is clamped to 0 m. The game's lowest minimum height is -100. This option also controls riverbed generation where NOAA data doesn't exist for large rivers inland.
+- ocean floor (m): Water below the water level takes its depth from NOAA's DEM Global Mosaic which has real depths where the elevation tiles store water as a flat surface. Riverbeds are estimated where NOAA data doesn't exist for large rivers inland. The ocean floor sets the lowest in-game height allowed. The game's lowest minimum height is -100.
 - water normalization: TF doesn't model water flow. It has only one water level. This option takes major water sources and attempts to bring them to the set water level. Rivers/lakes/etc at different elevations can then fill. They embed by gently sloping back to normal terrain height, up to ~10m difference in height.
 - max water displacement (m): shown while water normalization is on. It sets the most in-game meters a river or lake is lowered to reach the water level. Water sitting higher stays dry. The default is 100. Raise it for high lakes at the cost of a deeper bowl around them.
+- shore antialiasing: shown while water normalization is on, and on by default. It drops specks of water and land, smooths the shoreline's pixel steps, and blends the step at the water into the bank so the shore keeps its realistic slope.
 - bit depth: 16-bit grayscale PNG with no alpha channel by default. 8-bit is also available. Its height steps are coarse.
 - town names: take latin-character only names or the original accented/character names.
 - generation safety:
@@ -53,8 +54,6 @@ Images generate at 256 px per in-game km plus 1 on each axis, e.g. 7169 x 7169 f
 The live values come from a coarse preview of the box. If the full-resolution export finds a higher peak or a lower point, it widens the range. Always enter the values from the finished task in the bottom-left panel. The PNG's `Description` text chunk also stores them as JSON.
 
 Water levels can only be found where the elevation data stores water as perfectly flat surfaces. Generally this exists for lakes, reservoirs, rivers and the sea.
-
-Elevation data comes from [Mapterhorn](https://mapterhorn.com/) (terrarium encoding, no API key). It uses national elevation surveys where they exist, mostly 1 to 10 m ground models. Everywhere else it uses Copernicus GLO-30 at 30 m. Its tiles store the sea as a flat 0 m. Sea depths come only from NOAA (see include ocean data). Where a zoom level is missing or a tile holds wrong values, the export uses the next coarser zoom level's data. Neighboring tiles are sometimes built from different surveys. That can leave straight steps along their shared edges. The export also measures those steps and blends them out.
 
 ### Data Sources
 

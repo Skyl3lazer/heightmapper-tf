@@ -9,9 +9,10 @@ def surface_net(M, iters=40, lam=0.5, mu=None, eps=0.02, bi=0, bilam=0.2):
     top, bot, lef, rig = a != b, c != d, a != c, b != d
     mixed = top | bot | lef | rig
     I, J = np.mgrid[0:M.shape[0] - 1, 0:M.shape[1] - 1].astype(np.float64)
-    n = top.astype(float) + bot + lef + rig
-    Y = np.where(mixed, (top * I + bot * (I + 1) + (lef + rig) * (I + 0.5)) / np.maximum(n, 1), I + 0.5)
-    X = np.where(mixed, ((top + bot) * (J + 0.5) + lef * J + rig * (J + 1)) / np.maximum(n, 1), J + 0.5)
+    t, b, l, r = (e.astype(np.float64) for e in (top, bot, lef, rig))
+    n = t + b + l + r
+    Y = np.where(mixed, (t * I + b * (I + 1) + (l + r) * (I + 0.5)) / np.maximum(n, 1), I + 0.5)
+    X = np.where(mixed, ((t + b) * (J + 0.5) + l * J + r * (J + 1)) / np.maximum(n, 1), J + 0.5)
 
     def avg(Y, X):
         sy, sx, cnt = np.zeros_like(Y), np.zeros_like(X), np.zeros_like(Y)
